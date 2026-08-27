@@ -267,7 +267,8 @@ class App(tk.Tk):
             self._selected.remove(code)
         _save_config(self._selected, self.geometry())
         self._rebuild_cards()
-        self.after_idle(self._fit_window)
+        # 窗口尺寸保持固定（默认 3 个币种时的尺寸），币种增减不再变高，
+        # 多出的卡片通过滚动条/鼠标滚轮查看。
         self.refresh()
 
     def _rebuild_cards(self):
@@ -297,9 +298,10 @@ class App(tk.Tk):
     # ---------- 窗口尺寸 ----------
 
     def _fit_window(self):
-        """窗口高度自适应卡片数量（上限屏幕 85%），宽度保持当前值。
+        """首次启动时按默认（3 个币种）内容尺寸设定窗口。
 
-        在卡片重建后调用（初始化或币种增减），此时布局已稳定。
+        仅在无尺寸记忆的首次启动调用一次：之后窗口尺寸保持固定，
+        币种增减不再调整，多出的卡片通过滚动条/滚轮查看。
         """
         try:
             self.update_idletasks()

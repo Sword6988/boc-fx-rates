@@ -5,6 +5,7 @@
 """
 
 import ctypes
+import json
 import logging
 import os
 import queue
@@ -17,6 +18,8 @@ from datetime import datetime
 
 import fetcher
 from fetcher import (
+    ALL_CURRENCIES,
+    CODE_TO_CURRENCY,
     CURRENCIES,
     _brief,
     fetch_all,
@@ -61,6 +64,47 @@ def _resource_path(rel):
     return os.path.join(base, rel)
 
 
+def _config_dir():
+    """用户配置目录：%APPDATA%\\外汇现汇买入价查询（不可用时回退临时目录）。"""
+    base = os.environ.get("APPDATA") or tempfile.gettempdir()
+    d = os.path.join(base, APP_TITLE)
+    try:
+        os.makedirs(d, exist_ok=True)
+    except OSError:
+        pass
+    return d
+
+
+def _config_path():
+    return os.path.join(_config_dir(), "config.json")
+
+
+def _load_config():
+    """读取配置；缺失/损坏时返回默认（选中的 3 种货币）。"""
+    default = {"selected": [cur.code for cur in CURRENCIES]}
+    try:
+        with open(_config_path(), "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return default
+    selected = data.get("selected") if isinstance(data, dict) else None
+    if not isinstance(selected, list):
+        return default
+    valid = [c for c in selected if c in CODE_TO_CURRENCY]
+    if not valid:
+        return default
+    return {"selected": valid}
+
+
+def _save_config(selected):
+    """持久化选中币种（静默失败：配置写入非关键路径）。"""
+    try:
+        with open(_config_path(), "w", encoding="utf-8") as f:
+            json.dump({"selected": selected}, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
 def _fmt_time(t):
     """统一时间显示：BOC「2026/08/26 20:50:26」→「08-26 20:50」，备用源日期→「2026-08-26」。"""
     t = (t or "").strip()
@@ -99,7 +143,11 @@ class App(tk.Tk):
         self._status_base = "正在准备…"
         self._status_fg_state = "sub"
         self._last_update = ""
-        self._disp_by_code = {cur.code: cur.display for cur in CURRENCIES}
+        self._disp_by_code = {cur.code: cur.display for cur in ALL_CURRENCIES}
+        # 选中币种（代码列表，持久化到 %APPDATA%）
+        cfg = _load_config()
+        self._selected = [c for c in cfg["selected"] if c in CODE_TO_CURRENCY] or \
+                         [c.code for c in CURRENCIES]
 
         self._build_ui()
         self.bind("<F5>", lambda _e: self.refresh())
@@ -115,18 +163,34 @@ class App(tk.Tk):
         outer = tk.Frame(self, bg=COLOR_BG, padx=16, pady=12)
         outer.pack(fill="both", expand=True)
 
-        # 顶部标题区：应用名 + 副标题
+        # 顶部标题区：应用名 + 副标题（左），币种菜单（右）
         header = tk.Frame(outer, bg=COLOR_BG)
         header.pack(fill="x", pady=(0, 10))
-        tk.Label(header, text="外汇现汇买入价", bg=COLOR_BG, fg=COLOR_TEXT,
+        title_box = tk.Frame(header, bg=COLOR_BG)
+        title_box.pack(side="left", anchor="n")
+        tk.Label(title_box, text="外汇现汇买入价", bg=COLOR_BG, fg=COLOR_TEXT,
                  font=(FONT_FAMILY, 15, "bold")).pack(anchor="w")
-        tk.Label(header, text="中国银行外汇牌价 · 现汇买入价 / 市场参考汇率",
+        tk.Label(title_box, text="中国银行外汇牌价 · 现汇买入价 / 市场参考汇率",
                  bg=COLOR_BG, fg=COLOR_SUB,
                  font=(FONT_FAMILY, 9)).pack(anchor="w", pady=(2, 0))
+        self._build_currency_menu(header)
 
-        # 三种货币的卡片
-        for cur in CURRENCIES:
-            self.cards[cur.code] = self._build_card(outer, cur)
+        # 可滚动卡片区：卡片数量多时滚动查看
+        body = tk.Frame(outer, bg=COLOR_BG)
+        body.pack(fill="both", expand=True)
+        sb = tk.Scrollbar(body, orient="vertical", command=self._scroll_yview)
+        sb.pack(side="right", fill="y")
+        self.card_canvas = tk.Canvas(body, bg=COLOR_BG, highlightthickness=0,
+                                     yscrollcommand=sb.set)
+        self.card_canvas.pack(side="left", fill="both", expand=True)
+        self.cards_frame = tk.Frame(self.card_canvas, bg=COLOR_BG)
+        self._cards_win = self.card_canvas.create_window(
+            (0, 0), window=self.cards_frame, anchor="nw")
+        self.cards_frame.bind("<Configure>", self._on_cards_resize)
+        self.card_canvas.bind("<Configure>", self._on_canvas_resize)
+        self.card_canvas.bind("<MouseWheel>", self._on_mousewheel)
+
+        self._rebuild_cards()
 
         # 状态栏：状态圆点 + 状态文字 + 刷新按钮
         status_row = tk.Frame(outer, bg=COLOR_BG)
@@ -151,6 +215,63 @@ class App(tk.Tk):
                               lambda e: e.widget.config(bg=COLOR_ACCENT_DARK))
         self.btn_refresh.bind("<Leave>",
                               lambda e: e.widget.config(bg=COLOR_ACCENT))
+
+    # ---------- 币种选择 ----------
+
+    def _build_currency_menu(self, parent):
+        """右上角「币种」下拉菜单：勾选要显示的币种。"""
+        self.menu_btn = tk.Menubutton(
+            parent, text="币种 ▾", font=(FONT_FAMILY, 9, "bold"),
+            bg=COLOR_BTN, fg=COLOR_TEXT, activebackground=COLOR_BTN_ACTIVE,
+            relief="flat", padx=12, pady=3, cursor="hand2")
+        self.menu_btn.pack(side="right", anchor="n")
+        menu = tk.Menu(self.menu_btn, tearoff=False)
+        self.menu_btn.configure(menu=menu)
+        self._menu_vars = {}
+        for cur in ALL_CURRENCIES:
+            var = tk.BooleanVar(value=cur.code in self._selected)
+            self._menu_vars[cur.code] = var
+            menu.add_checkbutton(
+                label="%s（%s）" % (cur.display, cur.code), variable=var,
+                command=lambda c=cur.code: self._on_currency_toggle(c))
+
+    def _on_currency_toggle(self, code):
+        # 至少保留一个币种，避免空界面
+        if not self._menu_vars[code].get() and len(self._selected) <= 1:
+            self._menu_vars[code].set(True)
+            return
+        if self._menu_vars[code].get():
+            if code not in self._selected:
+                self._selected.append(code)
+        elif code in self._selected:
+            self._selected.remove(code)
+        _save_config(self._selected)
+        self._rebuild_cards()
+        self.refresh()
+
+    def _rebuild_cards(self):
+        """按当前选中币种重建卡片（按 ALL_CURRENCIES 顺序，避免菜单勾选顺序抖动）。"""
+        for w in self.cards_frame.winfo_children():
+            w.destroy()
+        self.cards = {}
+        self._selected = [c.code for c in ALL_CURRENCIES if c.code in self._selected]
+        self._selected_curs = [CODE_TO_CURRENCY[c] for c in self._selected]
+        for cur in self._selected_curs:
+            self.cards[cur.code] = self._build_card(self.cards_frame, cur)
+
+    # ---------- 滚动 ----------
+
+    def _scroll_yview(self, *args):
+        self.card_canvas.yview(*args)
+
+    def _on_cards_resize(self, _e):
+        self.card_canvas.configure(scrollregion=self.card_canvas.bbox("all"))
+
+    def _on_canvas_resize(self, e):
+        self.card_canvas.itemconfigure(self._cards_win, width=e.width)
+
+    def _on_mousewheel(self, e):
+        self.card_canvas.yview_scroll(int(-e.delta / 120), "units")
 
     def _build_card(self, parent, cur):
         code, disp = cur.code, cur.display
@@ -224,7 +345,7 @@ class App(tk.Tk):
 
     def _worker(self):
         try:
-            rows, err = fetch_all()
+            rows, err = fetch_all(self._selected)
             self.result_q.put({"rows": rows, "error": err})
         except Exception as e:
             logging.exception("抓取工作线程异常")
@@ -244,7 +365,7 @@ class App(tk.Tk):
 
         rows = msg.get("rows") or {}
         kept_old = False
-        for cur in CURRENCIES:
+        for cur in self._selected_curs:
             c = self.cards[cur.code]
             d = rows.get(cur.code)
             if d:
@@ -275,9 +396,9 @@ class App(tk.Tk):
             self._status_base = "点击「刷新」或按 F5 可手动更新"
             self._status_fg_state = "sub"
 
-        # 三个币种来自同一次抓取，更新时间统一放在元信息行
+        # 各币种来自同一次抓取，更新时间统一放在元信息行
         upd = ""
-        for cur in CURRENCIES:
+        for cur in self._selected_curs:
             d = rows.get(cur.code)
             if d and d.get("time"):
                 upd = d["time"]

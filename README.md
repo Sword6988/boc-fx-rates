@@ -1,9 +1,10 @@
 # 外汇现汇买入价查询
 
-Windows 桌面小工具：实时查询中国银行官网外汇牌价页的现汇买入价（美元、卢布），以及秘鲁新索尔（PEN）的市场参考汇率（中行不挂牌，自动使用备用汇率源并标注「备用源参考」）。
+Windows 桌面小工具：实时查询中国银行官网外汇牌价页的现汇买入价，支持多币种（默认美元、卢布；右上角「币种」菜单可勾选 30 种），其中秘鲁新索尔（PEN）中行不挂牌，自动使用备用汇率源并标注「备用源参考」。
 
 - 中行牌价单位为每 100 外币兑人民币，程序自动折算为「1 外币 = X 人民币」显示
 - 秘鲁新索尔备用源：open.er-api.com → currency-api@jsdelivr
+- 币种选择持久化到 `%APPDATA%\外汇现汇买入价查询\config.json`
 - 纯标准库，无第三方依赖；需 Python 3.8+、Windows
 
 ## 运行
@@ -44,6 +45,7 @@ python -m venv .venv
 ```text
 python tests\test_parse.py
 python tests\test_http.py
+python tests\test_fetchall.py
 ```
 
 联网抓取测试（量级校验）：

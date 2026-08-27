@@ -90,6 +90,38 @@ def test_fetch_all_pen_fails():
     print("fetch_all PEN 失败测试通过")
 
 
+def test_fetch_all_selected_subset():
+    """只选部分币种：仅返回所选，且不请求备用源。"""
+    def fake_boc():
+        return {"美元": {"buy": 671.22, "time": "2026/08/27 08:19:14"},
+                "卢布": {"buy": 7.58, "time": "2026/08/27 08:19:14"}}
+
+    with mock.patch.object(fetcher, "fetch_boc_rates", fake_boc) as fb, \
+         mock.patch.object(fetcher, "fetch_pen_reference") as fp:
+        rows, err = fetcher.fetch_all(selected=["USD"])
+    assert set(rows) == {"USD"}, "只应返回所选币种"
+    assert err is None
+    fp.assert_not_called(), "未选 PEN 时不应请求备用源"
+    print("fetch_all 选中子集测试通过")
+
+
+def test_fetch_all_selected_pen_only():
+    """只选 PEN：全部来自备用源。"""
+    def fake_boc():
+        return {"美元": {"buy": 671.22, "time": "2026/08/27 08:19:14"}}
+
+    def fake_pen():
+        return 2.0111, "open.er-api.com", "27 Aug 2026"
+
+    with mock.patch.object(fetcher, "fetch_boc_rates", fake_boc), \
+         mock.patch.object(fetcher, "fetch_pen_reference", fake_pen):
+        rows, err = fetcher.fetch_all(selected=["PEN"])
+    assert set(rows) == {"PEN"}
+    assert rows["PEN"]["fallback"] is True
+    assert err is None
+    print("fetch_all 仅 PEN 测试通过")
+
+
 # ------------------------- 解码 / 错误映射 / 格式化 -------------------------
 
 def _msg(charset):
@@ -170,14 +202,17 @@ def test_parse_default_column_order():
     print("无表头默认列序测试通过")
 
 
-def test_parse_missing_currency_skipped():
+def test_parse_wanted_filter():
     html = ("<table>"
             "<tr><td>货币名称</td><td>现汇买入价</td></tr>"
             "<tr><td>欧元</td><td>780.12</td></tr>"
+            "<tr><td>美元</td><td>671.22</td></tr>"
             "</table>")
-    rows = fetcher.parse_boc_html(html)
-    assert rows == {}, "非目标币种不应出现在结果中"
-    print("非目标币种跳过测试通过")
+    rows = fetcher.parse_boc_html(html, wanted={"美元"})
+    assert set(rows) == {"美元"}, "wanted 过滤应只返回指定币种"
+    rows_all = fetcher.parse_boc_html(html)
+    assert set(rows_all) == {"欧元", "美元"}, "不传 wanted 应全量解析"
+    print("parse wanted 过滤/全量解析测试通过")
 
 
 if __name__ == "__main__":
@@ -185,6 +220,8 @@ if __name__ == "__main__":
     test_fetch_all_boc_missing_currency()
     test_fetch_all_boc_fails_pen_succeeds()
     test_fetch_all_pen_fails()
+    test_fetch_all_selected_subset()
+    test_fetch_all_selected_pen_only()
     test_decode_html_charset_priority()
     test_decode_html_garbage_replace()
     test_friendly_net_error()
@@ -192,5 +229,5 @@ if __name__ == "__main__":
     test_fmt_time()
     test_parse_header_column_offset()
     test_parse_default_column_order()
-    test_parse_missing_currency_skipped()
+    test_parse_wanted_filter()
     print("全部 fetch_all/工具函数离线测试通过")

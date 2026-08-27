@@ -58,6 +58,43 @@ _MONTHS = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
            "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12}
 
 
+def _set_clipboard_win(text):
+    """用 Windows 原生 API 写入剪贴板（UTF-16LE），数据立即生效。
+
+    tkinter 的 clipboard_append 是延迟渲染（数据存于 Tk 进程内，由查看器
+    请求时才提供），在 Windows 上与剪贴板查看器/Win+V 兼容性差，常读到空。
+    原生 API 直接物化到系统剪贴板，任何程序立即可读。失败返回 False。
+    """
+    CF_UNICODETEXT = 13
+    GMEM_MOVEABLE = 0x0002
+    GMEM_ZEROINIT = 0x0040
+    data = text.encode("utf-16-le") + b"\x00\x00"   # 含终止 NUL
+    try:
+        if not ctypes.windll.user32.OpenClipboard(None):
+            return False
+        try:
+            ctypes.windll.user32.EmptyClipboard()
+            h_mem = ctypes.windll.kernel32.GlobalAlloc(
+                GMEM_MOVEABLE | GMEM_ZEROINIT, len(data))
+            if not h_mem:
+                return False
+            ptr = ctypes.windll.kernel32.GlobalLock(h_mem)
+            if not ptr:
+                ctypes.windll.kernel32.GlobalFree(h_mem)
+                return False
+            ctypes.memmove(ptr, data, len(data))
+            ctypes.windll.kernel32.GlobalUnlock(h_mem)
+            if not ctypes.windll.user32.SetClipboardData(CF_UNICODETEXT, h_mem):
+                # 失败时所有权未移交，需自行释放
+                ctypes.windll.kernel32.GlobalFree(h_mem)
+                return False
+            return True   # 成功后所有权归系统，不得再 GlobalFree
+        finally:
+            ctypes.windll.user32.CloseClipboard()
+    except Exception:
+        return False
+
+
 def _resource_path(rel):
     """获取资源绝对路径：兼容源码运行与 PyInstaller 冻结。"""
     base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
@@ -484,15 +521,15 @@ class App(tk.Tk):
             self._render_status()
             return
         s = fmt(r)
-        # 先清空再写入：clipboard_clear() 是异步交给窗口系统的，若不先
-        # update() 就让 clear 落地，紧随的 clipboard_append() 会被后到的
-        # clear 冲掉，导致剪贴板最终为空（tkinter 经典时序坑）。
-        self.clipboard_clear()
-        try:
-            self.update()
-        except tk.TclError:
-            pass
-        self.clipboard_append(s)
+        # 优先用 Windows 原生 API 写入剪贴板（立即物化、任何查看器可读）；
+        # 失败（如剪贴板被占用）时回退 tkinter 方案（clear 后先 update 落地）。
+        if not _set_clipboard_win(s):
+            self.clipboard_clear()
+            try:
+                self.update()
+            except tk.TclError:
+                pass
+            self.clipboard_append(s)
         disp = self._disp_by_code[code]
         self._status_base = "已复制：%s（1 %s 兑人民币）" % (s, disp)
         self._status_fg_state = "sub"

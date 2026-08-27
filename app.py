@@ -81,26 +81,33 @@ def _config_path():
 
 def _load_config():
     """读取配置；缺失/损坏时返回默认（选中的 3 种货币）。"""
-    default = {"selected": [cur.code for cur in CURRENCIES]}
+    default = {"selected": [cur.code for cur in CURRENCIES], "geometry": None}
     try:
         with open(_config_path(), "r", encoding="utf-8") as f:
             data = json.load(f)
     except Exception:
         return default
-    selected = data.get("selected") if isinstance(data, dict) else None
+    if not isinstance(data, dict):
+        return default
+    selected = data.get("selected")
     if not isinstance(selected, list):
-        return default
-    valid = [c for c in selected if c in CODE_TO_CURRENCY]
-    if not valid:
-        return default
-    return {"selected": valid}
+        selected = [cur.code for cur in CURRENCIES]
+    valid = [c for c in selected if c in CODE_TO_CURRENCY] or \
+            [cur.code for cur in CURRENCIES]
+    geometry = data.get("geometry")
+    if not isinstance(geometry, str):
+        geometry = None
+    return {"selected": valid, "geometry": geometry}
 
 
-def _save_config(selected):
-    """持久化选中币种（静默失败：配置写入非关键路径）。"""
+def _save_config(selected, geometry=None):
+    """持久化选中币种与窗口尺寸（静默失败：配置写入非关键路径）。"""
     try:
+        data = {"selected": selected}
+        if geometry:
+            data["geometry"] = geometry
         with open(_config_path(), "w", encoding="utf-8") as f:
-            json.dump({"selected": selected}, f, ensure_ascii=False, indent=2)
+            json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
 
@@ -129,7 +136,7 @@ class App(tk.Tk):
         super().__init__()
         self.title(APP_TITLE)
         self.configure(bg=COLOR_BG)
-        self.minsize(460, 460)
+        self.minsize(460, 380)
         self.resizable(True, True)
         # 替换默认 Tk 羽毛笔图标
         try:
@@ -144,10 +151,11 @@ class App(tk.Tk):
         self._status_fg_state = "sub"
         self._last_update = ""
         self._disp_by_code = {cur.code: cur.display for cur in ALL_CURRENCIES}
-        # 选中币种（代码列表，持久化到 %APPDATA%）
+        # 选中币种与窗口尺寸（持久化到 %APPDATA%）
         cfg = _load_config()
         self._selected = [c for c in cfg["selected"] if c in CODE_TO_CURRENCY] or \
                          [c.code for c in CURRENCIES]
+        self._saved_geometry = cfg.get("geometry")
 
         self._build_ui()
         self.bind("<F5>", lambda _e: self.refresh())
@@ -157,9 +165,18 @@ class App(tk.Tk):
         self.bind("<MouseWheel>", self._on_mousewheel)
         self.after(100, self._poll_queue)
         self.after(150, self.refresh)
-        # 启动后窗口居中
+        # 启动后：有尺寸记忆则恢复；否则窗口居中并让高度自适应卡片数
         self.update_idletasks()
-        self.eval("tk::PlaceWindow . center")
+        if self._saved_geometry:
+            try:
+                self.geometry(self._saved_geometry)
+            except Exception:
+                self.eval("tk::PlaceWindow . center")
+                self.after_idle(self._fit_window)
+        else:
+            self.eval("tk::PlaceWindow . center")
+            self.after_idle(self._fit_window)
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ---------- 界面构建 ----------
 
@@ -248,8 +265,9 @@ class App(tk.Tk):
                 self._selected.append(code)
         elif code in self._selected:
             self._selected.remove(code)
-        _save_config(self._selected)
+        _save_config(self._selected, self.geometry())
         self._rebuild_cards()
+        self.after_idle(self._fit_window)
         self.refresh()
 
     def _rebuild_cards(self):
@@ -275,6 +293,34 @@ class App(tk.Tk):
 
     def _on_mousewheel(self, e):
         self.card_canvas.yview_scroll(int(-e.delta / 120), "units")
+
+    # ---------- 窗口尺寸 ----------
+
+    def _fit_window(self):
+        """窗口高度自适应卡片数量（上限屏幕 85%），宽度保持当前值。
+
+        在卡片重建后调用（初始化或币种增减），此时布局已稳定。
+        """
+        try:
+            self.update_idletasks()
+            bb = self.card_canvas.bbox("all")
+            content_h = (bb[3] - bb[1]) if bb else 0
+            # 固定部分：标题区 + 状态栏 + 外边距（不含卡片画布）
+            fixed = self.winfo_height() - self.card_canvas.winfo_height()
+            total = fixed + content_h
+            total = min(total, int(self.winfo_screenheight() * 0.85))
+            total = max(total, 380)
+            self.geometry("%dx%d" % (self.winfo_width(), total))
+        except tk.TclError:
+            pass
+
+    def _on_close(self):
+        """关闭前保存窗口尺寸与币种选择，供下次启动恢复。"""
+        try:
+            _save_config(self._selected, self.geometry())
+        except Exception:
+            pass
+        self.destroy()
 
     def _build_card(self, parent, cur):
         code, disp = cur.code, cur.display

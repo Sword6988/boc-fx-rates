@@ -484,7 +484,14 @@ class App(tk.Tk):
             self._render_status()
             return
         s = fmt(r)
+        # 先清空再写入：clipboard_clear() 是异步交给窗口系统的，若不先
+        # update() 就让 clear 落地，紧随的 clipboard_append() 会被后到的
+        # clear 冲掉，导致剪贴板最终为空（tkinter 经典时序坑）。
         self.clipboard_clear()
+        try:
+            self.update()
+        except tk.TclError:
+            pass
         self.clipboard_append(s)
         disp = self._disp_by_code[code]
         self._status_base = "已复制：%s（1 %s 兑人民币）" % (s, disp)

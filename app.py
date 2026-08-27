@@ -151,6 +151,10 @@ class App(tk.Tk):
 
         self._build_ui()
         self.bind("<F5>", lambda _e: self.refresh())
+        # 滚轮绑定在顶层窗口：Tk 事件按 bindtags 链传播，子组件（卡片等）
+        # 上的滚轮事件都会触发，覆盖整个窗口；不要在卡片画布上单独绑定，
+        # 否则鼠标在卡片上滚动无效。
+        self.bind("<MouseWheel>", self._on_mousewheel)
         self.after(100, self._poll_queue)
         self.after(150, self.refresh)
         # 启动后窗口居中
@@ -188,7 +192,6 @@ class App(tk.Tk):
             (0, 0), window=self.cards_frame, anchor="nw")
         self.cards_frame.bind("<Configure>", self._on_cards_resize)
         self.card_canvas.bind("<Configure>", self._on_canvas_resize)
-        self.card_canvas.bind("<MouseWheel>", self._on_mousewheel)
 
         self._rebuild_cards()
 

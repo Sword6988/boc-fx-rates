@@ -12,3 +12,7 @@ build/
 
 # 调试日志
 *_debug.log
+
+# 本机工具目录（非项目内容）
+.reasonix/
+.workbuddy/

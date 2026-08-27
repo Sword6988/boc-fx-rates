@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# 虚拟环境
+.venv/
+
+# PyInstaller 构建产物
+dist/
+build/
+*.spec
+
+# 调试日志
+*_debug.log

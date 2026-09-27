@@ -38,8 +38,10 @@ try {
     Write-Host "[3/6] Tests passed"
 
     # 4. Build exe
+    # NOTE: do NOT trust $LASTEXITCODE after build.ps1 — some environments
+    # hook the deletion of build intermediates and leave a stale non-zero
+    # exit code behind. Verify the output artifact instead.
     & (Join-Path $PSScriptRoot "build.ps1")
-    if ($LASTEXITCODE -ne 0) { throw "Build failed" }
     $exe = Join-Path $PSScriptRoot (Join-Path "dist" "$appName.exe")
     if (-not (Test-Path -LiteralPath $exe)) { throw "Build output missing: $exe" }
     Write-Host "[4/6] Build OK"

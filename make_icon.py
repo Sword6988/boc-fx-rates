@@ -1,9 +1,12 @@
 # -*- coding: utf-8 -*-
-"""生成程序图标 app_icon.ico：中行红圆角底 + 白色地球(外汇) + 环绕兑换箭头。"""
-import math
+"""生成程序图标 app_icon.ico：中行红圆角底 + 白色 ¥（与界面头部品牌徽标一致）。
+
+界面头部徽标为 36px 圆角方块（圆角半径 10，约 0.28），¥ 用微软雅黑加粗；
+本脚本以同样比例生成多尺寸 ICO，保证标题栏/任务栏/exe 与页面观感统一。
+"""
 import os
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app_icon.ico")
 RED = (184, 27, 34)        # 与程序主色 COLOR_ACCENT (#b81b22) 一致
@@ -11,16 +14,32 @@ RED_DARK = (150, 20, 26)   # 底部微暗，增加立体感
 WHITE = (255, 255, 255, 255)
 SS = 8                      # 超采样倍数，抗锯齿
 
+# 微软雅黑加粗：小尺寸下 ¥ 笔画更清晰
+_FONT_CANDIDATES = [
+    r"C:\Windows\Fonts\msyhbd.ttc",
+    r"C:\Windows\Fonts\msyh.ttc",
+    r"C:\Windows\Fonts\arialuni.ttf",
+]
+
+
+def _load_font(px):
+    for path in _FONT_CANDIDATES:
+        if os.path.exists(path):
+            try:
+                return ImageFont.truetype(path, px)
+            except OSError:
+                continue
+    return ImageFont.load_default()
+
 
 def make_icon(size):
     """返回 size×size 的 RGBA 图标（已带透明背景）。"""
     s = size * SS
     img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
 
-    # 圆角方形背景
+    # 圆角方形背景：圆角比例与界面徽标一致（10/36 ≈ 0.28）
     margin = int(s * 0.04)
-    radius = int(s * 0.22)
+    radius = int(s * 0.28)
     bg = Image.new("RGBA", (s, s), (0, 0, 0, 0))
     bd = ImageDraw.Draw(bg)
     # 底部加深的一层（阴影感）
@@ -33,52 +52,18 @@ def make_icon(size):
     img = Image.alpha_composite(img, bg)
     d = ImageDraw.Draw(img)
 
-    cx = cy = s / 2.0
-    r = s * 0.27
+    # 白色 ¥ 居中：字号约占方块高度 62%（与界面徽标 15/36 ≈ 0.42 相比略大，
+    # 因为 ICO 在任务栏只有 16-32px，需要更饱满才可辨认）
+    font = _load_font(int(s * 0.62))
+    text = "¥"
+    bbox = d.textbbox((0, 0), text, font=font)
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    # textbbox 原点含字形内部偏移，绘制时反向补偿实现视觉居中
+    d.text((s / 2 - tw / 2 - bbox[0], s / 2 - th / 2 - bbox[1]),
+           text, font=font, fill=WHITE)
 
-    # 地球：外圈 + 经线 + 纬线（白色）
-    lw = max(1, int(s * 0.028))
-    d.ellipse([cx - r, cy - r, cx + r, cy + r], outline=WHITE, width=lw)
-    # 经线（竖直椭圆）
-    d.ellipse([cx - r * 0.45, cy - r, cx + r * 0.45, cy + r],
-              outline=WHITE, width=max(1, int(lw * 0.8)))
-    # 纬线（两条水平弦）
-    for k in (-0.5, 0.5):
-        y = cy + k * r
-        half = math.sqrt(max(0.0, r * r - (k * r) ** 2))
-        d.line([cx - half, y, cx + half, y], fill=WHITE, width=max(1, int(lw * 0.8)))
-
-    # 环绕兑换箭头（两个相对的弧箭头，象征外汇兑换/刷新）
-    ar = r * 1.5
-    aw = max(1, int(s * 0.03))
-    # 上半个圆弧（从左下到右上）
-    d.arc([cx - ar, cy - ar, cx + ar, cy + ar], start=200, end=340,
-          fill=WHITE, width=aw)
-    # 下半个圆弧（从右上到左下）
-    d.arc([cx - ar, cy - ar, cx + ar, cy + ar], start=20, end=160,
-          fill=WHITE, width=aw)
-    # 箭头头部（两个小三角）
-    _arrow_head(d, cx + ar * math.cos(math.radians(340)),
-                cy - ar * math.sin(math.radians(340)), angle=340, w=aw * 2.2)
-    _arrow_head(d, cx + ar * math.cos(math.radians(160)),
-                cy - ar * math.sin(math.radians(160)), angle=160, w=aw * 2.2)
-
-    # 缩小到目标尺寸
     img = img.resize((size, size), Image.LANCZOS)
     return img
-
-
-def _arrow_head(d, x, y, angle, w):
-    """在 (x,y) 处绘制指向 tangent 方向的小三角箭头。"""
-    a = math.radians(angle)
-    # 切线方向（圆弧逆时针）
-    tx, ty = -math.sin(a), -math.cos(a)
-    px, py = math.cos(a), -math.sin(a)  # 法线
-    L = w * 1.6
-    p1 = (x + tx * L, y + ty * L)
-    p2 = (x - tx * L * 0.2 + px * L * 0.9, y - ty * L * 0.2 + py * L * 0.9)
-    p3 = (x - tx * L * 0.2 - px * L * 0.9, y - ty * L * 0.2 - py * L * 0.9)
-    d.polygon([p1, p2, p3], fill=WHITE)
 
 
 def main():

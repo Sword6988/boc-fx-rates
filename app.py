@@ -97,12 +97,16 @@ F_BTN_MAIN = (FONT_FAMILY, 10, "bold") # 主按钮（刷新）
 F_BTN_SMALL = (FONT_FAMILY, 9)         # 次级按钮（复制/币种菜单）
 
 # 响应式多列卡片布局参数：
-# 卡片用 grid 排布，列数由可用宽度与卡片实测自然宽度共同决定（1/2/3 列），
+# 卡片用 grid 排布，列数由可用宽度与卡片实测自然宽度共同决定（1~4 列），
 # 列宽均分。内容区下限保证窄窗口可用；实际上限按最宽卡片的自然宽度
-# 联动放大（_content_max_w），保证满列数时任何币种名称都不截断。
+# 联动放大（_content_max_w），并给每列留出 CARD_SLACK 余量——否则上限
+# 恰好卡在列数阈值下方几像素时（扣除滚动条/内边距后），超宽窗口下
+# 满列数永远无法触发，卡片会被过度拉伸。列数同时钳制到实际卡片数，
+# 避免币种较少时出现空列分宽。
 CARD_IDEAL_W = 350     # 列数判定的兜底单位宽（无卡片可测时使用）
 CARD_GAP = 12          # 卡片间距
-MAX_COLS = 3           # 最大列数
+MAX_COLS = 4           # 最大列数（超宽窗口下 4 列铺满，减少两侧留白）
+CARD_SLACK = 60        # 满列时每列允许吸收的额外宽度（列数判定余量）
 MAX_CONTENT_W = MAX_COLS * CARD_IDEAL_W + (MAX_COLS - 1) * CARD_GAP + 36
 
 
@@ -579,17 +583,24 @@ class App(tk.Tk):
         """按画布可用宽度与卡片实测自然宽度计算列数，钳制 1..MAX_COLS。
 
         cols = (可用宽 + 间距) // (单列占位宽 + 间距)。以实测的最宽
-        卡片为单位，保证选出的列数下每张卡（含最长币种名）都放得下。
+        卡片为单位，保证选出的列数下每张卡（含最长币种名）都放得下；
+        再钳制到实际卡片数，币种少时不出空列。
         """
         unit = self._card_unit_w()
         cols = (canvas_w + CARD_GAP) // (unit + CARD_GAP)
+        n = len(getattr(self, "_selected_curs", []) or [])
+        if n:
+            cols = min(cols, n)
         return max(1, min(MAX_COLS, int(cols)))
 
     def _content_max_w(self):
         """内容区宽度上限：下限 MAX_CONTENT_W，且随最宽卡片联动放大，
-        保证满列数（MAX_COLS）时最宽的卡片也放得下。"""
-        need = MAX_COLS * self._card_unit_w() + (MAX_COLS - 1) * CARD_GAP + 36
-        return max(MAX_CONTENT_W, need)
+        并给每列留 CARD_SLACK 余量，保证满列数时最宽的卡片放得下、
+        列数判定不会卡在阈值下方几像素。列数按实际卡片数收窄（币种
+        少时内容区不必为满列数预留宽度）。"""
+        n = min(MAX_COLS, max(1, len(getattr(self, "_selected_curs", []) or [])))
+        need = n * self._card_unit_w() + (n - 1) * CARD_GAP + 36
+        return max(MAX_CONTENT_W, need + n * CARD_SLACK)
 
     def _apply_content_width(self):
         """按当前上限重设内容区宽度（窗口实际宽与上限取小者）。"""

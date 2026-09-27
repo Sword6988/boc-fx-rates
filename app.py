@@ -223,6 +223,8 @@ class App(tk.Tk):
         # 消失，不落盘）。切换币种重建卡片时先用它即时渲染旧值（标注
         # 「上次数据」），避免等待网络期间显示「--」。
         self._session = {}
+        self._panel = None          # 币种下拉面板（Toplevel，打开时非 None）
+        self._panel_checks = {}     # 面板中各币种的勾选框 Canvas
         self._status_base = "正在准备…"
         self._status_fg_state = "sub"
         self._last_update = ""
@@ -341,7 +343,12 @@ class App(tk.Tk):
     # ---------- 币种选择 ----------
 
     def _build_currency_menu(self, parent):
-        """右上角「币种」下拉菜单：勾选要显示的币种。"""
+        """右上角「币种」按钮：点击弹出与整体风格一致的自绘下拉面板。
+
+        不用原生 tk.Menu（系统菜单观感与扁平卡片风不搭）：面板为白底
+        卡片 + 圆角勾选框 + 行 hover 高亮；点行切换（面板保持打开，
+        便于连续增删币种），点面板外部或 Esc 关闭。
+        """
         self.menu_btn = tk.Menubutton(
             parent, text="币种 ▾", font=F_BTN_SMALL,
             bg=COLOR_BTN, fg=COLOR_BTN_TEXT,
@@ -351,15 +358,119 @@ class App(tk.Tk):
         _bind_hover(self.menu_btn,
                     (COLOR_BTN, COLOR_BTN_TEXT),
                     (COLOR_BTN_ACTIVE, COLOR_BTN_TEXT))
-        menu = tk.Menu(self.menu_btn, tearoff=False)
-        self.menu_btn.configure(menu=menu)
-        self._menu_vars = {}
-        for cur in ALL_CURRENCIES:
-            var = tk.BooleanVar(value=cur.code in self._selected)
-            self._menu_vars[cur.code] = var
-            menu.add_checkbutton(
-                label="%s（%s）" % (cur.display, cur.code), variable=var,
-                command=lambda c=cur.code: self._on_currency_toggle(c))
+        self.menu_btn.bind("<Button-1>", lambda _e: self._toggle_currency_panel())
+        # 币种勾选状态（面板与配置持久化的单一事实来源）
+        self._menu_vars = {cur.code: tk.BooleanVar(value=cur.code in self._selected)
+                           for cur in ALL_CURRENCIES}
+
+    def _toggle_currency_panel(self):
+        if self._panel is not None:
+            self._close_currency_panel()
+        else:
+            self._open_currency_panel()
+
+    def _open_currency_panel(self):
+        panel = tk.Toplevel(self, bg=COLOR_CARD,
+                            highlightthickness=1,
+                            highlightbackground=COLOR_BORDER)
+        panel.overrideredirect(True)     # 无系统边框（自绘卡片）
+        panel.attributes("-topmost", True)
+        self._panel = panel
+        self._panel_checks = {}
+
+        # 头部说明 + 分隔线
+        head = tk.Frame(panel, bg=COLOR_CARD)
+        head.pack(fill="x", padx=14, pady=(10, 6))
+        tk.Label(head, text="显示币种", bg=COLOR_CARD, fg=COLOR_SUB,
+                 font=F_TAG).pack(side="left")
+        tk.Frame(panel, bg=COLOR_DIVIDER, height=1).pack(fill="x")
+
+        # 双列币种行（30 个币种单列会超出屏幕高度）
+        body = tk.Frame(panel, bg=COLOR_CARD)
+        body.pack(fill="both", expand=True, padx=8, pady=(6, 10))
+        n_cols = 2
+        per_col = (len(ALL_CURRENCIES) + n_cols - 1) // n_cols
+        for idx, cur in enumerate(ALL_CURRENCIES):
+            rowf = tk.Frame(body, bg=COLOR_CARD, padx=8, pady=6)
+            rowf.grid(row=idx % per_col, column=idx // per_col,
+                      sticky="nsew", padx=2, pady=1)
+            chk = tk.Canvas(rowf, width=16, height=16, bg=COLOR_CARD,
+                            highlightthickness=0)
+            chk.pack(side="left", padx=(0, 8))
+            lbl = tk.Label(rowf, text="%s（%s）" % (cur.display, cur.code),
+                           bg=COLOR_CARD, fg=COLOR_TEXT, font=F_BTN_SMALL)
+            lbl.pack(side="left")
+            code = cur.code
+            widgets = (rowf, chk, lbl)
+            for w in widgets:
+                w.config(cursor="hand2")
+                w.bind("<Button-1>", lambda _e, c=code: self._panel_toggle(c))
+                w.bind("<Enter>", lambda _e, ws=widgets: [
+                    x.config(bg=COLOR_BTN_ACTIVE) for x in ws])
+                w.bind("<Leave>", lambda _e, ws=widgets: [
+                    x.config(bg=COLOR_CARD) for x in ws])
+            self._panel_checks[code] = chk
+        body.grid_columnconfigure(0, weight=1)
+        body.grid_columnconfigure(1, weight=1)
+
+        # 定位：按钮右下角下方，钳制到屏幕内
+        panel.update_idletasks()
+        bx = self.menu_btn.winfo_rootx()
+        by = self.menu_btn.winfo_rooty()
+        x = bx + self.menu_btn.winfo_width() - panel.winfo_width()
+        y = by + self.menu_btn.winfo_height() + 6
+        x = max(4, min(x, self.winfo_screenwidth() - panel.winfo_width() - 4))
+        y = max(4, min(y, self.winfo_screenheight() - panel.winfo_height() - 4))
+        panel.geometry("+%d+%d" % (x, y))
+        self._sync_currency_panel()
+        # 全局抓取：点面板外任意位置即关闭（点击落在面板自身上且
+        # 坐标在面板范围外 → 判定为外部点击）；Esc 亦可关闭
+        panel.bind("<Button-1>", self._on_panel_outside_click)
+        panel.bind("<Escape>", lambda _e: self._close_currency_panel())
+        try:
+            panel.wait_visibility()
+            panel.grab_set_global()
+        except tk.TclError:
+            pass
+
+    def _on_panel_outside_click(self, e):
+        p = self._panel
+        if p is None:
+            return
+        if e.x < 0 or e.y < 0 or e.x > p.winfo_width() or e.y > p.winfo_height():
+            self._close_currency_panel()
+
+    def _close_currency_panel(self):
+        p = self._panel
+        self._panel = None
+        self._panel_checks = {}
+        if p is not None:
+            try:
+                p.grab_release()
+            except Exception:
+                pass
+            p.destroy()
+            self.focus_set()
+
+    def _panel_toggle(self, code):
+        var = self._menu_vars[code]
+        var.set(not var.get())
+        self._on_currency_toggle(code)
+        # 「至少保留一个币种」守卫可能回滚 var，统一以 var 重绘勾选框
+        self._sync_currency_panel()
+
+    def _sync_currency_panel(self):
+        if not (self._panel is not None and self._panel.winfo_exists()):
+            return
+        for code, chk in self._panel_checks.items():
+            chk.delete("all")
+            if self._menu_vars[code].get():
+                _rounded_rect(chk, 1, 1, 15, 15, 5, fill=COLOR_ACCENT, outline="")
+                chk.create_text(8, 8, text="✓", fill="white",
+                                font=(FONT_FAMILY, 9, "bold"))
+            else:
+                _rounded_rect(chk, 1, 1, 15, 15, 5,
+                              fill=COLOR_CARD, outline=COLOR_BORDER)
 
     def _on_currency_toggle(self, code):
         # 至少保留一个币种，避免空界面

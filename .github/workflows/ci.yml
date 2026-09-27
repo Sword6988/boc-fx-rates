@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      # 测试已彻底不依赖 tkinter（纯标准库），Linux runner 即可跑全量离线测试
+      - run: python run_tests.py
+
+  # 推送 v* 标签时：测试通过后构建 exe 并创建 GitHub Release 附件
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install PyInstaller
+        run: pip install pyinstaller==6.22.2
+      - name: Build exe
+        run: >
+          python -m PyInstaller --onefile --windowed --clean
+          --name 外汇现汇买入价查询 --icon app_icon.ico
+          --add-data "app_icon.ico;." --version-file version_info.txt
+          boc_fx_rates.py
+      - name: Create release with exe
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.exe

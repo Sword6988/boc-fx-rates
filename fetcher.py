@@ -2,7 +2,7 @@
 """抓取与解析层：中行牌价页、秘鲁备用源。
 
 仅标准库，不依赖界面（tkinter）。界面层（app.py）通过
-fetch_all() / fmt() 使用本模块。
+fetch_all() / fmt() / _fmt_time() 使用本模块。
 """
 
 import html.parser
@@ -16,6 +16,8 @@ import urllib.error
 import urllib.request
 from collections import namedtuple
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from typing import Dict, Optional, Set, Tuple, Union
 
 # ----------------------------- 配置 -----------------------------
 
@@ -205,7 +207,7 @@ def _decode_html(raw, headers):
     return raw.decode("utf-8-sig", "replace")
 
 
-def parse_boc_html(text, wanted=None):
+def parse_boc_html(text: str, wanted: Optional[Set[str]] = None) -> Dict[str, dict]:
     """从中行牌价页 HTML 提取现汇买入价（纯解析，可离线测试）。
 
     wanted：币种名集合；None 时返回页面全部可解析币种。
@@ -249,7 +251,7 @@ def parse_boc_html(text, wanted=None):
     return result
 
 
-def fetch_boc_rates():
+def fetch_boc_rates() -> Dict[str, dict]:
     """抓取中行外汇牌价页并解析（返回页面全部挂牌币种）。返回同 parse_boc_html。"""
     raw, headers = _http_get(BOC_URL)
     return parse_boc_html(_decode_html(raw, headers))
@@ -317,7 +319,32 @@ def _brief(e):
     return s if len(s) <= 80 else s[:80] + "..."
 
 
-def fetch_all(selected=None):
+# 英文月份缩写 → 数字（用于备用源日期格式 "26 Aug 2026"）
+_MONTHS = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+           "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12}
+
+
+def _fmt_time(t):
+    """统一时间显示：BOC「2026/08/26 20:50:26」→「08-26 20:50」，备用源日期→「2026-08-26」。"""
+    t = (t or "").strip()
+    if not t:
+        return ""
+    for pat, out in (("%Y/%m/%d %H:%M:%S", "%Y-%m-%d %H:%M"),
+                     ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M")):
+        try:
+            return datetime.strptime(t, pat).strftime(out)
+        except ValueError:
+            continue
+    m = re.match(r"(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})$", t)
+    if m:
+        mon = _MONTHS.get(m.group(2).lower())
+        if mon:
+            return "%04d-%02d-%02d" % (int(m.group(3)), mon, int(m.group(1)))
+    return t
+
+
+def fetch_all(selected: Optional[list] = None
+              ) -> Tuple[Dict[str, dict], Optional[str]]:
     """抓取所选币种数据。
 
     selected：币种代码列表（如 ["USD", "PEN"]）；None 时用默认 CURRENCIES。
@@ -377,7 +404,7 @@ def fetch_all(selected=None):
     return rows, ("；".join(errors) or None)
 
 
-def fmt(v):
+def fmt(v: Optional[Union[int, float]]) -> str:
     """按数值量级选择合适的小数位数。"""
     if v is None:
         return "--"

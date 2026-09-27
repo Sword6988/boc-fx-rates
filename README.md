@@ -21,7 +21,7 @@ python boc_fx_rates.py
 
 ## 打包
 
-先准备构建环境（首次）：
+先准备构建环境（首次，或直接 `pip install -r requirements-dev.txt`）：
 
 ```powershell
 python -m venv .venv
@@ -37,6 +37,15 @@ python -m venv .venv
 产物：`dist\外汇现汇买入价查询.exe`（PyInstaller onefile，含图标、版本信息，自动清理中间产物）。
 
 说明：`build.ps1` 优先使用 `.venv`，若 venv 缺失/失效则自动回退系统 python（需装有 PyInstaller）。Python 3.14 环境请使用 PyInstaller 6.22+（6.21 及以下不支持其 Tcl/Tk 9 打包）。
+
+## 首次运行提示（SmartScreen）
+
+exe 未做代码签名，首次运行时 Windows SmartScreen 可能弹出「Windows 已保护你的电脑」。这是对无签名程序的常规拦截，属预期现象：
+
+1. 点击「更多信息」；
+2. 点击「仍要运行」即可（仅首次）。
+
+也可以右键 exe → 属性 → 勾选「解除锁定」→ 确定，再双击运行。
 
 ## 测试
 

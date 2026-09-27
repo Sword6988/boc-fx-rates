@@ -12,30 +12,35 @@
 
 import ctypes
 import ctypes.wintypes
-import json
 import logging
 import os
 import queue
-import re
 import sys
 import tempfile
 import threading
 import tkinter as tk
+import traceback
 from datetime import datetime
 
 import fetcher
+from config import (
+    APP_TITLE,
+    _clamp_geometry,
+    _config_dir,
+    _config_path,
+    _load_config,
+    _save_config,
+)
 from fetcher import (
     ALL_CURRENCIES,
     CODE_TO_CURRENCY,
-    CURRENCIES,
     _brief,
+    _fmt_time,
     fetch_all,
     fmt,
 )
 
 # ----------------------------- 配置 -----------------------------
-
-APP_TITLE = "外汇现汇买入价查询"
 
 FONT_FAMILY = "Microsoft YaHei UI"
 FONT_MONO = "Consolas"
@@ -87,10 +92,6 @@ F_BTN_MAIN = (FONT_FAMILY, 9, "bold")  # 主按钮（刷新）
 F_BTN_SMALL = (FONT_FAMILY, 9)         # 次级按钮（复制/币种菜单）
 
 MAX_CONTENT_W = 760   # 内容区最大宽度（超出后整体居中，避免卡片被拉得过宽）
-
-# 英文月份缩写 → 数字（用于备用源日期格式 "26 Aug 2026"）
-_MONTHS = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
-           "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12}
 
 
 def _set_clipboard_win(text):
@@ -152,141 +153,35 @@ def _resource_path(rel):
     return os.path.join(base, rel)
 
 
-def _config_dir():
-    """用户配置目录：%APPDATA%\\外汇现汇买入价查询（不可用时回退临时目录）。"""
-    base = os.environ.get("APPDATA") or tempfile.gettempdir()
-    d = os.path.join(base, APP_TITLE)
-    try:
-        os.makedirs(d, exist_ok=True)
-    except OSError:
-        pass
-    return d
+def _log_crash(context, exc):
+    """未捕获异常兜底：仅故障发生时追加写 crash.log，不引入常驻日志。
 
-
-def _config_path():
-    return os.path.join(_config_dir(), "config.json")
-
-
-# Tk 窗口尺寸的标准格式「WxH[±X±Y]」（config.json 中 geometry 字段只接受此格式，
-# 畸形值按无尺寸记忆处理，避免直接传给 self.geometry() 设置异常尺寸/位置）
-_GEOMETRY_RE = re.compile(r"^\d{1,5}x\d{1,5}([+-]\d{1,5}[+-]\d{1,5})?$")
-# 带位置部分的 geometry（钳制时解析各字段用）
-_GEOMETRY_XY_RE = re.compile(
-    r"^(\d{1,5})x(\d{1,5})([+-]\d{1,5})([+-]\d{1,5})$")
-
-# 钳制后窗口至少保留这么多像素可见于虚拟屏幕内
-_GEOMETRY_VISIBLE_PX = 80
-
-# GetSystemMetrics 的虚拟屏幕 / 主屏索引
-_SM_XVIRTUALSCREEN = 76
-_SM_YVIRTUALSCREEN = 77
-_SM_CXVIRTUALSCREEN = 78
-_SM_CYVIRTUALSCREEN = 79
-_SM_CXSCREEN = 0
-_SM_CYSCREEN = 1
-
-
-def _virtual_screen():
-    """查询多屏虚拟桌面范围 (vx, vy, vw, vh)。
-
-    用 GetSystemMetrics 的 SM_*VIRTUALSCREEN 系列取多屏虚拟桌面整体范围
-    （含负坐标，如左侧副屏时 vx<0）；调用失败回退主屏 (0, 0, 宽, 高)。
+    背景：--windowed 打包的 exe 没有 stderr，未开 --debug 时 logging
+    也没有 handler，worker 线程 / Tk 回调里的未预期异常会完全不可见，
+    用户报「打开没反应」时无从诊断。此函数保证异常留痕：写入
+    %APPDATA%\\<应用名>\\crash.log（目录不可写等失败时静默跳过）。
     """
-    user32 = ctypes.windll.user32
     try:
-        vx = user32.GetSystemMetrics(_SM_XVIRTUALSCREEN)
-        vy = user32.GetSystemMetrics(_SM_YVIRTUALSCREEN)
-        vw = user32.GetSystemMetrics(_SM_CXVIRTUALSCREEN)
-        vh = user32.GetSystemMetrics(_SM_CYVIRTUALSCREEN)
-        if vw <= 0 or vh <= 0:
-            raise OSError("虚拟屏幕尺寸无效：%dx%d" % (vw, vh))
-        return vx, vy, vw, vh
-    except Exception:
-        # 回退主屏：SM_CXSCREEN(0) / SM_CYSCREEN(1)，原点 (0, 0)
-        return 0, 0, user32.GetSystemMetrics(_SM_CXSCREEN), \
-            user32.GetSystemMetrics(_SM_CYSCREEN)
-
-
-def _clamp_geometry(geo, screen=None):
-    """把记忆的窗口位置钳制到虚拟屏幕内，尺寸保持原值。
-
-    背景：双屏用户拔掉副屏后，self.geometry() 会合法记忆出屏外坐标，
-    下次启动窗口完全不可见（只能任务栏右键移动恢复）。
-
-    钳制规则：x ∈ [vx - w + 80, vx + vw - 80]，y 同理——保证窗口至少
-    保留约 80px 可见于屏内；屏内坐标原样返回（行为不变）。
-    screen：(vx, vy, vw, vh)，None 时实时查询虚拟屏幕（测试可注入）。
-    geo 无位置部分（仅 WxH）或非标准格式时原样返回。
-    """
-    m = _GEOMETRY_XY_RE.match(geo.strip())
-    if not m:
-        return geo
-    w, h, x, y = (int(g) for g in m.groups())
-    if screen is None:
-        screen = _virtual_screen()
-    vx, vy, vw, vh = screen
-    vis = _GEOMETRY_VISIBLE_PX
-    # 理论上 lo ≤ hi 恒成立（w、vw 均非负且屏幕不小于 160px），防御式钳制
-    x = min(vx + vw - vis, max(vx - w + vis, x))
-    y = min(vy + vh - vis, max(vy - h + vis, y))
-    return "%dx%d%+d%+d" % (w, h, x, y)
-
-
-def _load_config():
-    """读取配置；缺失/损坏时返回默认（选中的 3 种货币）。"""
-    default = {"selected": [cur.code for cur in CURRENCIES], "geometry": None}
-    try:
-        with open(_config_path(), "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception:
-        return default
-    if not isinstance(data, dict):
-        return default
-    selected = data.get("selected")
-    if not isinstance(selected, list):
-        selected = [cur.code for cur in CURRENCIES]
-    # isinstance(c, str) 防御畸形配置里的不可哈希元素（如嵌套 dict/list）：
-    # 否则 `c in CODE_TO_CURRENCY` 会抛 TypeError 导致启动崩溃；
-    # dict.fromkeys 去重（保持首次出现顺序）。
-    valid = list(dict.fromkeys(
-        c for c in selected if isinstance(c, str) and c in CODE_TO_CURRENCY))
-    if not valid:
-        valid = [cur.code for cur in CURRENCIES]
-    geometry = data.get("geometry")
-    if not isinstance(geometry, str) or not _GEOMETRY_RE.match(geometry.strip()):
-        geometry = None
-    return {"selected": valid, "geometry": geometry}
-
-
-def _save_config(selected, geometry=None):
-    """持久化选中币种与窗口尺寸（静默失败：配置写入非关键路径）。"""
-    try:
-        data = {"selected": selected}
-        if geometry:
-            data["geometry"] = geometry
-        with open(_config_path(), "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        path = os.path.join(_config_dir(), "crash.log")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write("%s [%s]\n%s\n" % (
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"), context,
+                "".join(traceback.format_exception(
+                    type(exc), exc, exc.__traceback__)).rstrip()))
     except Exception:
         pass
 
 
-def _fmt_time(t):
-    """统一时间显示：BOC「2026/08/26 20:50:26」→「08-26 20:50」，备用源日期→「2026-08-26」。"""
-    t = (t or "").strip()
-    if not t:
-        return ""
-    for pat, out in (("%Y/%m/%d %H:%M:%S", "%Y-%m-%d %H:%M"),
-                     ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M")):
-        try:
-            return datetime.strptime(t, pat).strftime(out)
-        except ValueError:
-            continue
-    m = re.match(r"(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})$", t)
-    if m:
-        mon = _MONTHS.get(m.group(2).lower())
-        if mon:
-            return "%04d-%02d-%02d" % (int(m.group(3)), mon, int(m.group(1)))
-    return t
+def _bind_hover(widget, normal, active, guard=None):
+    """统一 hover 变色绑定，消除三处按钮的重复样板。
+
+    normal/active 为 (bg, fg) 元组；guard(widget) 返回 False 时该次
+    Enter/Leave 不变色（用于禁用态、「已复制 ✓」反馈期等守卫）。
+    """
+    widget.bind("<Enter>", lambda e: None if guard and not guard(e.widget)
+                else e.widget.config(bg=active[0], fg=active[1]))
+    widget.bind("<Leave>", lambda e: None if guard and not guard(e.widget)
+                else e.widget.config(bg=normal[0], fg=normal[1]))
 
 
 class App(tk.Tk):
@@ -407,19 +302,10 @@ class App(tk.Tk):
             relief="flat", padx=16, pady=4, cursor="hand2", takefocus=0,
             bd=0)
         self.btn_refresh.pack(side="right", padx=(8, 0))
-        self.btn_refresh.bind("<Enter>", self._on_refresh_enter)
-        self.btn_refresh.bind("<Leave>", self._on_refresh_leave)
-
-    # ---------- 交互反馈（hover/禁用态） ----------
-
-    def _on_refresh_enter(self, _e):
         # 禁用态不变色，避免「刷新中…」被 hover 提亮造成可点错觉
-        if str(self.btn_refresh["state"]) == "normal":
-            self.btn_refresh.config(bg=COLOR_ACCENT_DARK)
-
-    def _on_refresh_leave(self, _e):
-        if str(self.btn_refresh["state"]) == "normal":
-            self.btn_refresh.config(bg=COLOR_ACCENT)
+        _bind_hover(self.btn_refresh,
+                    (COLOR_ACCENT, "white"), (COLOR_ACCENT_DARK, "white"),
+                    guard=lambda w: str(w["state"]) == "normal")
 
     # ---------- 币种选择 ----------
 
@@ -431,10 +317,9 @@ class App(tk.Tk):
             activebackground=COLOR_BTN_ACTIVE, activeforeground=COLOR_BTN_TEXT,
             relief="flat", padx=12, pady=4, cursor="hand2", takefocus=0)
         self.menu_btn.pack(side="right", anchor="n")
-        self.menu_btn.bind("<Enter>",
-                           lambda e: e.widget.config(bg=COLOR_BTN_ACTIVE))
-        self.menu_btn.bind("<Leave>",
-                           lambda e: e.widget.config(bg=COLOR_BTN))
+        _bind_hover(self.menu_btn,
+                    (COLOR_BTN, COLOR_BTN_TEXT),
+                    (COLOR_BTN_ACTIVE, COLOR_BTN_TEXT))
         menu = tk.Menu(self.menu_btn, tearoff=False)
         self.menu_btn.configure(menu=menu)
         self._menu_vars = {}
@@ -579,12 +464,10 @@ class App(tk.Tk):
                              highlightcolor=COLOR_BORDER)
         btn_copy.pack(side="right")
         btn_copy.flashing = False   # 「已复制 ✓」反馈期间 hover 不变色
-        btn_copy.bind("<Enter>", lambda e: None if getattr(
-            e.widget, "flashing", False) else e.widget.config(
-            bg=COLOR_BTN_ACTIVE, fg=COLOR_BTN_TEXT_ACTIVE))
-        btn_copy.bind("<Leave>", lambda e: None if getattr(
-            e.widget, "flashing", False) else e.widget.config(
-            bg=COLOR_BTN, fg=COLOR_BTN_TEXT))
+        _bind_hover(btn_copy,
+                    (COLOR_BTN, COLOR_BTN_TEXT),
+                    (COLOR_BTN_ACTIVE, COLOR_BTN_TEXT_ACTIVE),
+                    guard=lambda w: not getattr(w, "flashing", False))
 
         # 分隔线：头部与数值区之间
         tk.Frame(card, bg=COLOR_DIVIDER, height=1).pack(fill="x", pady=(10, 9))
@@ -638,6 +521,7 @@ class App(tk.Tk):
             self.result_q.put({"rows": rows, "error": err})
         except Exception as e:
             logging.exception("抓取工作线程异常")
+            _log_crash("worker", e)
             self.result_q.put({"rows": {}, "error": "发生异常：%s" % _brief(e)})
 
     def _poll_queue(self):
@@ -647,6 +531,14 @@ class App(tk.Tk):
         except queue.Empty:
             pass
         self.after(100, self._poll_queue)
+
+    def report_callback_exception(self, exc, val, tb):
+        """Tk 主循环回调未捕获异常兜底（覆写 Tk 默认行为）。
+
+        默认实现只写 stderr——--windowed 打包的 exe 下会完全丢失；
+        这里落到 crash.log，保证用户侧异常可诊断。
+        """
+        _log_crash("ui-callback", val if val is not None else exc)
 
     def _apply_result(self, msg):
         self._fetching = False

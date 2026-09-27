@@ -16,7 +16,7 @@ BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE)
 
 import fetcher
-from app import _fmt_time
+from fetcher import _fmt_time
 
 
 # ------------------------- fetch_all 编排 -------------------------
@@ -218,7 +218,7 @@ def test_parse_wanted_filter():
 # ------------------------- 配置读取健壮性 -------------------------
 
 def _write_cfg(content):
-    """写入临时 config.json 并返回一个替换 app._config_path 的函数。"""
+    """写入临时 config.json 并返回一个替换 config._config_path 的函数。"""
     import tempfile
     d = tempfile.mkdtemp(prefix="fx_cfg_test_")
     path = os.path.join(d, "config.json")
@@ -231,9 +231,9 @@ def _write_cfg(content):
 
 
 def _load_with(content):
-    import app as app_mod
-    with mock.patch.object(app_mod, "_config_path", _write_cfg(content)):
-        return app_mod._load_config()
+    import config as config_mod
+    with mock.patch.object(config_mod, "_config_path", _write_cfg(content)):
+        return config_mod._load_config()
 
 
 def test_load_config_unhashable_selected():
@@ -261,18 +261,18 @@ def test_load_config_malformed_geometry():
     assert _load_config_geometry_is_none('{"geometry": 123}')
     assert _load_config_geometry_is_none('{"geometry": ["640x480"]}')
     assert _load_config_geometry_is_none('{"geometry": "x480"}')
-    import app as app_mod
+    import config as config_mod
     for geo in ("640x480", "1024x768+10-5", "440x380-20+30"):
-        with mock.patch.object(app_mod, "_config_path",
+        with mock.patch.object(config_mod, "_config_path",
                                _write_cfg('{"geometry": "%s"}' % geo)):
-            assert app_mod._load_config()["geometry"] == geo, geo
+            assert config_mod._load_config()["geometry"] == geo, geo
     print("config 畸形 geometry 防御测试通过")
 
 
 def _load_config_geometry_is_none(content):
-    import app as app_mod
-    with mock.patch.object(app_mod, "_config_path", _write_cfg(content)):
-        return app_mod._load_config()["geometry"] is None
+    import config as config_mod
+    with mock.patch.object(config_mod, "_config_path", _write_cfg(content)):
+        return config_mod._load_config()["geometry"] is None
 
 
 def test_load_config_broken_json():
@@ -287,7 +287,7 @@ def test_load_config_broken_json():
 
 def test_clamp_geometry():
     """屏外坐标钳回虚拟屏幕内（保留 80px 可见），屏内坐标不变。"""
-    from app import _clamp_geometry
+    from config import _clamp_geometry
     pri = (0, 0, 1920, 1080)
     # 屏外大坐标 → 钳到右/下边界内 80px
     assert _clamp_geometry("440x380+99999+99999", screen=pri) == \

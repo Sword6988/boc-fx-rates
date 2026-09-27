@@ -1,0 +1,4 @@
+# 打包构建所需（开发/构建环境，运行本程序无需任何第三方依赖）
+# 安装：pip install -r requirements-dev.txt
+# 注意：Python 3.14 需 PyInstaller 6.22+（6.21 及以下不支持其 Tcl/Tk 9 打包）
+pyinstaller==6.22.2

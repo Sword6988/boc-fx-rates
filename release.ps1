@@ -47,12 +47,20 @@ try {
     Write-Host "[4/6] Build OK"
 
     # 5. Create tag if missing, push branch + tag
+    # Retries: the local proxy intermittently aborts the CONNECT tunnel (502 /
+    # schannel close_notify); a retry usually succeeds.
     $localTag = & git tag --list $Tag
     if (-not $localTag) { & git tag $Tag }
-    & git push origin main
-    if ($LASTEXITCODE -ne 0) { throw "git push main failed" }
-    & git push origin $Tag
-    if ($LASTEXITCODE -ne 0) { throw "git push $Tag failed" }
+    foreach ($what in @("main", $Tag)) {
+        $done = $false
+        for ($attempt = 1; $attempt -le 3; $attempt++) {
+            $out = & git push origin $what 2>&1
+            if ($LASTEXITCODE -eq 0) { $done = $true; break }
+            Write-Host "git push $what failed (attempt $attempt): $out"
+            Start-Sleep -Seconds 10
+        }
+        if (-not $done) { throw "git push $what failed after 3 attempts" }
+    }
     Write-Host "[5/6] Pushed main + $Tag"
 
     # 6. Create GitHub Release via API and upload exe

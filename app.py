@@ -884,17 +884,17 @@ class App(tk.Tk):
     # ---------- 卡片统一排版规范 ----------
     # 所有卡片共用同一组常量与对齐规则，保证任意币种、任意数据状态下
     # 排版一致：
-    # - 结构固定：头部行（符号+名称｜来源胶囊+复制）→ 分隔线 → 数值行
-    #   （单位+数值｜人民币），行内元素全部底边对齐（anchor="s"）——同
-    #   排不同字号的文字共用一条视觉底线，避免居中对齐造成的基线漂浮；
-    # - 左右分区：左侧是主体信息（币种、数值），右侧是元信息/单位
-    #   （胶囊、复制、人民币），各元素位置不随币种名称长度变化，所有
-    #   卡片的视觉轴线完全一致；
+    # - 结构固定：头部行（符号+名称｜来源胶囊+复制）→ 分隔线 → 数值区
+    #   两行（小灰字「1 外币 =」；红色大数值+「人民币」基线对齐同行）。
+    #   单位独占一行后数值行不再左右争抢空间，窄卡下不拥挤；同排不同
+    #   字号的文字用 anchor="s" 底边对齐，共用一条视觉基线；
+    # - 左右分区：头部行左侧是主体信息（币种），右侧是元信息/操作
+    #   （胶囊、复制），各元素位置不随币种名称长度变化；
     # - 层级分明：币种名深色、数值红色大字（视觉焦点）、单位与次级
     #   文字灰色弱化，主次一眼可辨；
     # - 数值列宽固定 8 字符（等宽字体）：容纳 fmt 对 <0.01 汇率的 8 字符
     #   输出（如 KRW「0.005200」），且数据从「--」变为数值、6~8 字符
-    #   长度变化时布局保持不动。
+    #   长度变化时「人民币」位置保持不动。
 
     def _build_card(self, parent, cur):
         code, disp = cur.code, cur.display
@@ -935,25 +935,29 @@ class App(tk.Tk):
         # 分隔线：头部与数值区之间（上下等距）
         tk.Frame(card, bg=COLOR_DIVIDER, height=1).pack(fill="x", pady=11)
 
-        # 主数值行：左=「1 外币 =」+ 数值（焦点）；右=「人民币」贴齐卡片
-        # 右缘——所有卡片的「人民币」位置完全一致，形成整齐的表格感，
-        # 也消除数值中部的大片空洞。单位文字灰色弱化，突出红色数值。
-        mid = tk.Frame(card, bg=COLOR_CARD)
-        mid.pack(fill="x")
-        lbl_cur = tk.Label(mid, text="1 %s =" % disp, bg=COLOR_CARD,
-                           fg=COLOR_SUB, font=F_UNIT, anchor="s")
-        lbl_cur.pack(side="left", anchor="s", pady=(0, 4))
-        value = tk.Label(mid, text="--", bg=COLOR_CARD, fg=COLOR_ACCENT,
+        # 数值区（两行结构）：上=灰色小字单位「1 外币 =」；下=红色大数值
+        # +「人民币」基线对齐。把单位移出数值行后，数值行左右不再争抢
+        # 空间（双列窄卡下此前左侧单位+数值与右侧「人民币」同排，显得
+        # 拥挤），大数值独占一行更有呼吸感；「人民币」紧跟数值组成完整
+        # 的价格读数。数值列宽固定 8 字符，刷新时「人民币」位置不动。
+        val_area = tk.Frame(card, bg=COLOR_CARD)
+        val_area.pack(fill="x")
+        lbl_cur = tk.Label(val_area, text="1 %s =" % disp, bg=COLOR_CARD,
+                           fg=COLOR_SUB, font=F_UNIT, anchor="w")
+        lbl_cur.pack(anchor="w", pady=(0, 2))
+        row = tk.Frame(val_area, bg=COLOR_CARD)
+        row.pack(anchor="w")
+        value = tk.Label(row, text="--", bg=COLOR_CARD, fg=COLOR_ACCENT,
                          font=F_VALUE, width=8, anchor="w")
-        value.pack(side="left", padx=(4, 6))
-        lbl_cny = tk.Label(mid, text="人民币", bg=COLOR_CARD,
+        value.pack(side="left")
+        lbl_cny = tk.Label(row, text="人民币", bg=COLOR_CARD,
                            fg=COLOR_SUB, font=F_UNIT, anchor="s")
-        lbl_cny.pack(side="right", anchor="s", pady=(0, 4))
+        lbl_cny.pack(side="left", anchor="s", pady=(0, 4), padx=(0, 8))
 
         # 双击任意位置复制；整卡可点区域统一 hand2 指针示意可交互。
         # btn_copy 不参与双击绑定：其 command 在单击释放时已触发，
         # 双击会导致 command×2 + 双击绑定×1 共 3 次重复复制。
-        for w in (card, top, sym, title, tag, mid, lbl_cur, value,
+        for w in (card, top, sym, title, tag, val_area, row, lbl_cur, value,
                   lbl_cny):
             w.config(cursor="hand2")
             w.bind("<Double-Button-1>", lambda e, c=code: self._copy(c))

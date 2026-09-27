@@ -39,14 +39,18 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "PyInstaller failed, exit code $LASTEXITCODE"
     }
-    # Clean regenerable intermediates
+    # Clean regenerable intermediates (non-fatal: some environments block
+    # scripted deletion; the intermediates are rebuilt on the next run anyway)
     $build = Join-Path $PSScriptRoot "build"
     $spec = Join-Path $PSScriptRoot "$appName.spec"
-    if (Test-Path -LiteralPath $build) {
-        Remove-Item -LiteralPath $build -Recurse -Force
-    }
-    if (Test-Path -LiteralPath $spec) {
-        Remove-Item -LiteralPath $spec -Force
+    foreach ($item in @($build, $spec)) {
+        if (Test-Path -LiteralPath $item) {
+            try {
+                Remove-Item -LiteralPath $item -Recurse -Force
+            } catch {
+                Write-Warning "Could not clean $item (non-fatal): $($_.Exception.Message)"
+            }
+        }
     }
     $exe = Join-Path $PSScriptRoot (Join-Path "dist" "$appName.exe")
     Write-Host "Build OK: $exe"

@@ -47,9 +47,27 @@ exe 未做代码签名，首次运行时 Windows SmartScreen 可能弹出「Wind
 
 也可以右键 exe → 属性 → 勾选「解除锁定」→ 确定，再双击运行。
 
+## 发布
+
+推送 `v*` 标签到 GitHub 后，CI（`.github/workflows/ci.yml`）会自动运行测试、构建 exe 并创建 Release 附件。
+
+本地一键发布（CI 不可用时的备用通道）：
+
+```powershell
+.\release.ps1 -Tag v1.3.7 [-NotesFile 发布说明.md]
+```
+
+流程：校验 tag 与 `version_info.txt` 版本一致 → 工作区干净检查 → 跑测试 → 打包 → 推送 main 与 tag → 通过 GitHub API 创建 Release 并上传 exe（附件名 `boc-fx-rates-<tag>.exe`）。
+
 ## 测试
 
-离线测试（解析 / HTTP 逻辑，无需联网）：
+一键运行全部离线测试（解析 / HTTP 逻辑 / 配置，无需联网）：
+
+```text
+python run_tests.py
+```
+
+也可单独运行：
 
 ```text
 python tests\test_parse.py

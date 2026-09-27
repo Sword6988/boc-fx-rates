@@ -101,13 +101,15 @@ def _read_limited(resp):
     return data
 
 
-def _http_get(url, timeout=10, retries=1):
+def _http_get(url, timeout=15, retries=1):
     """GET 请求，返回 (响应字节, 响应头)。
 
     - 仅当显式开启 ALLOW_INSECURE 且证书校验失败时，才降级为不校验证书
       重试一次；默认证书问题直接失败，不静默跳过证书校验；
-    - 瞬时网络错误（超时/连接中断）最多重试 retries 次；
-    - 默认超时 10s（最坏等待 ≈ 10s × 2 次请求 = 20s）。
+    - 瞬时网络错误（超时/连接中断/SSL 错误）最多重试 retries 次。
+      同时捕获 URLError 包装形式与连接/读取阶段直接抛出的裸异常
+      （如 resp.read() 阶段的 TimeoutError）；
+    - 默认超时 15s（最坏等待 ≈ 15s × 2 次请求 = 30s）。
     """
     req = urllib.request.Request(url, headers={
         "User-Agent": UA,
@@ -118,7 +120,8 @@ def _http_get(url, timeout=10, retries=1):
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return _read_limited(resp), resp.headers
-        except (urllib.error.URLError, ssl.SSLCertVerificationError) as e:
+        except (urllib.error.URLError, TimeoutError, ConnectionError,
+                ssl.SSLError) as e:
             reason = getattr(e, "reason", e)
             if isinstance(reason, ssl.SSLCertVerificationError):
                 if not ALLOW_INSECURE:

@@ -2,9 +2,16 @@
 """外汇现汇买入价查询（Windows 桌面程序）— 界面层。
 
 抓取/解析逻辑见 fetcher.py，程序入口为 boc_fx_rates.py。
+
+界面设计约定：
+- 配色集中在 PALETTE 常量区，全部界面仅引用这些常量；
+- 字体/字号集中在 FONTS 常量区，形成「标题 > 卡片题 > 数值 > 说明/状态」层级；
+- 内容区（标题/卡片/状态栏）限最大宽度并水平居中，窗口拉大时布局合理延展；
+- 所有可点击元素统一 hand2 指针、hover 反馈与 takefocus=0（去除虚线焦点框）。
 """
 
 import ctypes
+import ctypes.wintypes
 import json
 import logging
 import os
@@ -33,25 +40,53 @@ APP_TITLE = "外汇现汇买入价查询"
 FONT_FAMILY = "Microsoft YaHei UI"
 FONT_MONO = "Consolas"
 
-COLOR_BG = "#f3f4f6"          # 窗口背景
-COLOR_CARD = "#ffffff"
-COLOR_BORDER = "#e4e7ec"      # 卡片描边
-COLOR_DIVIDER = "#eef0f3"     # 卡片内分隔线
-COLOR_TEXT = "#1f2329"
-COLOR_SUB = "#8a919f"         # 次级文字
-COLOR_ACCENT = "#b81b22"      # 中行红
-COLOR_ACCENT_DARK = "#9c151c" # 中行红（hover/按下加深）
-COLOR_TAG_FALLBACK = "#8a6d3b"
-COLOR_BTN = "#f1f3f5"
-COLOR_BTN_ACTIVE = "#e4e7ec"
-COLOR_WARN = "#b45309"        # 状态圆点/文字：警告
+# ------------------------- 调色板（浅色主题） -------------------------
 
-# 状态圆点颜色（按 _status_fg_state）
+COLOR_BG = "#f4f5f7"           # 窗口背景
+COLOR_CARD = "#ffffff"         # 卡片背景
+COLOR_BORDER = "#e4e7ec"       # 卡片描边
+COLOR_DIVIDER = "#f0f2f4"      # 卡片内分隔线
+COLOR_TEXT = "#1f2329"         # 主文字
+COLOR_SUB = "#8a919f"          # 次级文字
+COLOR_ACCENT = "#b81b22"       # 中行红（主强调：数值/符号/主按钮）
+COLOR_ACCENT_DARK = "#9a151b"  # 中行红（hover/按下加深）
+COLOR_TAG_FALLBACK = "#8a6d3b" # 备用源标签
+COLOR_BTN = "#f2f3f5"          # 次级按钮底色
+COLOR_BTN_ACTIVE = "#e6e9ed"   # 次级按钮 hover
+COLOR_BTN_TEXT = "#4a5160"     # 次级按钮文字（比 SUB 深，避免误读为禁用）
+COLOR_BTN_TEXT_ACTIVE = "#1f2329"
+COLOR_WARN = "#b45309"         # 警告（琥珀色，不刺眼）
+COLOR_ERR = "#bb3a3a"          # 错误（柔和红，非纯红）
+COLOR_BUSY = "#3a6ea5"         # 进行中（中性蓝，与错误红区分，避免误读为出错）
+COLOR_OK = "#1e7f3c"           # 成功反馈（复制成功）
+COLOR_OK_SOFT = "#e9f6ee"      # 成功反馈按钮底色（淡绿）
+COLOR_REFRESH_DISABLED_BG = "#e4e6ea"   # 刷新按钮禁用底色
+COLOR_REFRESH_DISABLED_FG = "#a7adb8"   # 刷新按钮禁用文字
+
+# 状态圆点/状态文字配色（按 _status_fg_state 键取用，圆点与文字共用同一配色表）
 _STATUS_DOT = {
     "sub": COLOR_SUB,
     "warn": COLOR_WARN,
-    "busy": COLOR_ACCENT,
+    "err": COLOR_ERR,
+    "ok": COLOR_OK,
+    "busy": COLOR_BUSY,
 }
+
+# --------------------- 字体层级（统一引用） ---------------------
+
+F_TITLE = (FONT_FAMILY, 16, "bold")    # 窗口主标题
+F_SUBTITLE = (FONT_FAMILY, 9)          # 主标题下副说明
+F_CARD_TITLE = (FONT_FAMILY, 12, "bold")  # 卡片币种名
+F_CARD_SYMBOL = (FONT_FAMILY, 13, "bold") # 卡片货币符号
+F_TAG = (FONT_FAMILY, 9)               # 卡片来源标签
+F_VALUE = (FONT_MONO, 20, "bold")      # 主数值（等宽，防刷新跳动）
+F_UNIT = (FONT_FAMILY, 11)             # 「1 外币 =」「人民币」单位
+F_SRC = (FONT_FAMILY, 9)               # 来源行
+F_STATUS = (FONT_FAMILY, 9)            # 状态行
+F_BTN_MAIN = (FONT_FAMILY, 9, "bold")  # 主按钮（刷新）
+F_BTN_SMALL = (FONT_FAMILY, 9)         # 次级按钮（复制/币种菜单）
+
+MAX_CONTENT_W = 760   # 内容区最大宽度（超出后整体居中，避免卡片被拉得过宽）
 
 # 英文月份缩写 → 数字（用于备用源日期格式 "26 Aug 2026"）
 _MONTHS = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
@@ -68,29 +103,45 @@ def _set_clipboard_win(text):
     CF_UNICODETEXT = 13
     GMEM_MOVEABLE = 0x0002
     GMEM_ZEROINIT = 0x0040
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    # x64 正确性：HGLOBAL/HANDLE/LPVOID 均为指针宽度（64 位），ctypes 默认把
+    # 返回值按 32 位 c_int 处理会截断句柄——尤其是 GlobalLock 返回的内存指针，
+    # 截断后 memmove 会写到错误地址，导致复制失败甚至进程崩溃。
+    # 语义核对：restype=c_void_p 后 API 失败返回 None，`if not h_mem`、
+    # `if not ptr`、`if not SetClipboardData(...)` 的判空逻辑保持不变。
+    kernel32.GlobalAlloc.argtypes = [ctypes.c_uint, ctypes.c_size_t]
+    kernel32.GlobalAlloc.restype = ctypes.c_void_p
+    kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalLock.restype = ctypes.c_void_p
+    kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalFree.argtypes = [ctypes.c_void_p]
+    user32.OpenClipboard.argtypes = [ctypes.wintypes.HWND]   # 传 NULL = 关联当前线程
+    user32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.wintypes.HANDLE]
+    user32.SetClipboardData.restype = ctypes.wintypes.HANDLE
     data = text.encode("utf-16-le") + b"\x00\x00"   # 含终止 NUL
     try:
-        if not ctypes.windll.user32.OpenClipboard(None):
+        if not user32.OpenClipboard(None):
             return False
         try:
-            ctypes.windll.user32.EmptyClipboard()
-            h_mem = ctypes.windll.kernel32.GlobalAlloc(
+            user32.EmptyClipboard()
+            h_mem = kernel32.GlobalAlloc(
                 GMEM_MOVEABLE | GMEM_ZEROINIT, len(data))
             if not h_mem:
                 return False
-            ptr = ctypes.windll.kernel32.GlobalLock(h_mem)
+            ptr = kernel32.GlobalLock(h_mem)
             if not ptr:
-                ctypes.windll.kernel32.GlobalFree(h_mem)
+                kernel32.GlobalFree(h_mem)
                 return False
             ctypes.memmove(ptr, data, len(data))
-            ctypes.windll.kernel32.GlobalUnlock(h_mem)
-            if not ctypes.windll.user32.SetClipboardData(CF_UNICODETEXT, h_mem):
+            kernel32.GlobalUnlock(h_mem)
+            if not user32.SetClipboardData(CF_UNICODETEXT, h_mem):
                 # 失败时所有权未移交，需自行释放
-                ctypes.windll.kernel32.GlobalFree(h_mem)
+                kernel32.GlobalFree(h_mem)
                 return False
             return True   # 成功后所有权归系统，不得再 GlobalFree
         finally:
-            ctypes.windll.user32.CloseClipboard()
+            user32.CloseClipboard()
     except Exception:
         return False
 
@@ -116,6 +167,71 @@ def _config_path():
     return os.path.join(_config_dir(), "config.json")
 
 
+# Tk 窗口尺寸的标准格式「WxH[±X±Y]」（config.json 中 geometry 字段只接受此格式，
+# 畸形值按无尺寸记忆处理，避免直接传给 self.geometry() 设置异常尺寸/位置）
+_GEOMETRY_RE = re.compile(r"^\d{1,5}x\d{1,5}([+-]\d{1,5}[+-]\d{1,5})?$")
+# 带位置部分的 geometry（钳制时解析各字段用）
+_GEOMETRY_XY_RE = re.compile(
+    r"^(\d{1,5})x(\d{1,5})([+-]\d{1,5})([+-]\d{1,5})$")
+
+# 钳制后窗口至少保留这么多像素可见于虚拟屏幕内
+_GEOMETRY_VISIBLE_PX = 80
+
+# GetSystemMetrics 的虚拟屏幕 / 主屏索引
+_SM_XVIRTUALSCREEN = 76
+_SM_YVIRTUALSCREEN = 77
+_SM_CXVIRTUALSCREEN = 78
+_SM_CYVIRTUALSCREEN = 79
+_SM_CXSCREEN = 0
+_SM_CYSCREEN = 1
+
+
+def _virtual_screen():
+    """查询多屏虚拟桌面范围 (vx, vy, vw, vh)。
+
+    用 GetSystemMetrics 的 SM_*VIRTUALSCREEN 系列取多屏虚拟桌面整体范围
+    （含负坐标，如左侧副屏时 vx<0）；调用失败回退主屏 (0, 0, 宽, 高)。
+    """
+    user32 = ctypes.windll.user32
+    try:
+        vx = user32.GetSystemMetrics(_SM_XVIRTUALSCREEN)
+        vy = user32.GetSystemMetrics(_SM_YVIRTUALSCREEN)
+        vw = user32.GetSystemMetrics(_SM_CXVIRTUALSCREEN)
+        vh = user32.GetSystemMetrics(_SM_CYVIRTUALSCREEN)
+        if vw <= 0 or vh <= 0:
+            raise OSError("虚拟屏幕尺寸无效：%dx%d" % (vw, vh))
+        return vx, vy, vw, vh
+    except Exception:
+        # 回退主屏：SM_CXSCREEN(0) / SM_CYSCREEN(1)，原点 (0, 0)
+        return 0, 0, user32.GetSystemMetrics(_SM_CXSCREEN), \
+            user32.GetSystemMetrics(_SM_CYSCREEN)
+
+
+def _clamp_geometry(geo, screen=None):
+    """把记忆的窗口位置钳制到虚拟屏幕内，尺寸保持原值。
+
+    背景：双屏用户拔掉副屏后，self.geometry() 会合法记忆出屏外坐标，
+    下次启动窗口完全不可见（只能任务栏右键移动恢复）。
+
+    钳制规则：x ∈ [vx - w + 80, vx + vw - 80]，y 同理——保证窗口至少
+    保留约 80px 可见于屏内；屏内坐标原样返回（行为不变）。
+    screen：(vx, vy, vw, vh)，None 时实时查询虚拟屏幕（测试可注入）。
+    geo 无位置部分（仅 WxH）或非标准格式时原样返回。
+    """
+    m = _GEOMETRY_XY_RE.match(geo.strip())
+    if not m:
+        return geo
+    w, h, x, y = (int(g) for g in m.groups())
+    if screen is None:
+        screen = _virtual_screen()
+    vx, vy, vw, vh = screen
+    vis = _GEOMETRY_VISIBLE_PX
+    # 理论上 lo ≤ hi 恒成立（w、vw 均非负且屏幕不小于 160px），防御式钳制
+    x = min(vx + vw - vis, max(vx - w + vis, x))
+    y = min(vy + vh - vis, max(vy - h + vis, y))
+    return "%dx%d%+d%+d" % (w, h, x, y)
+
+
 def _load_config():
     """读取配置；缺失/损坏时返回默认（选中的 3 种货币）。"""
     default = {"selected": [cur.code for cur in CURRENCIES], "geometry": None}
@@ -129,10 +245,15 @@ def _load_config():
     selected = data.get("selected")
     if not isinstance(selected, list):
         selected = [cur.code for cur in CURRENCIES]
-    valid = [c for c in selected if c in CODE_TO_CURRENCY] or \
-            [cur.code for cur in CURRENCIES]
+    # isinstance(c, str) 防御畸形配置里的不可哈希元素（如嵌套 dict/list）：
+    # 否则 `c in CODE_TO_CURRENCY` 会抛 TypeError 导致启动崩溃；
+    # dict.fromkeys 去重（保持首次出现顺序）。
+    valid = list(dict.fromkeys(
+        c for c in selected if isinstance(c, str) and c in CODE_TO_CURRENCY))
+    if not valid:
+        valid = [cur.code for cur in CURRENCIES]
     geometry = data.get("geometry")
-    if not isinstance(geometry, str):
+    if not isinstance(geometry, str) or not _GEOMETRY_RE.match(geometry.strip()):
         geometry = None
     return {"selected": valid, "geometry": geometry}
 
@@ -173,7 +294,7 @@ class App(tk.Tk):
         super().__init__()
         self.title(APP_TITLE)
         self.configure(bg=COLOR_BG)
-        self.minsize(460, 380)
+        self.minsize(440, 380)
         self.resizable(True, True)
         # 替换默认 Tk 羽毛笔图标
         try:
@@ -187,11 +308,12 @@ class App(tk.Tk):
         self._status_base = "正在准备…"
         self._status_fg_state = "sub"
         self._last_update = ""
+        self._sb_visible = True     # 滚动条当前是否显示（按需隐藏）
         self._disp_by_code = {cur.code: cur.display for cur in ALL_CURRENCIES}
         # 选中币种与窗口尺寸（持久化到 %APPDATA%）
+        # _load_config 已保证 selected 非空且均为合法币种代码
         cfg = _load_config()
-        self._selected = [c for c in cfg["selected"] if c in CODE_TO_CURRENCY] or \
-                         [c.code for c in CURRENCIES]
+        self._selected = list(cfg["selected"])
         self._saved_geometry = cfg.get("geometry")
 
         self._build_ui()
@@ -206,7 +328,8 @@ class App(tk.Tk):
         self.update_idletasks()
         if self._saved_geometry:
             try:
-                self.geometry(self._saved_geometry)
+                # 钳制到虚拟屏幕内：拔掉副屏后记忆的屏外坐标会导致窗口不可见
+                self.geometry(_clamp_geometry(self._saved_geometry))
             except Exception:
                 self.eval("tk::PlaceWindow . center")
                 self.after_idle(self._fit_window)
@@ -218,28 +341,42 @@ class App(tk.Tk):
     # ---------- 界面构建 ----------
 
     def _build_ui(self):
-        outer = tk.Frame(self, bg=COLOR_BG, padx=16, pady=12)
+        # 内容区统一限宽并水平居中：窗口远宽于 MAX_CONTENT_W 时卡片不被拉伸，
+        # 标题/状态栏与卡片保持同一边距、同一中轴线，视觉更整齐。
+        outer = tk.Frame(self, bg=COLOR_BG)
         outer.pack(fill="both", expand=True)
+        self._content = tk.Frame(outer, bg=COLOR_BG)
+        self._content.place(relx=0.5, rely=0, anchor="n", relheight=1.0,
+                            width=min(440, MAX_CONTENT_W))
+        outer.bind("<Configure>", self._on_outer_resize)
+
+        pad = tk.Frame(self._content, bg=COLOR_BG, padx=18, pady=14)
+        pad.pack(fill="both", expand=True)
 
         # 顶部标题区：应用名 + 副标题（左），币种菜单（右）
-        header = tk.Frame(outer, bg=COLOR_BG)
-        header.pack(fill="x", pady=(0, 10))
+        header = tk.Frame(pad, bg=COLOR_BG)
+        header.pack(fill="x", pady=(0, 12))
         title_box = tk.Frame(header, bg=COLOR_BG)
         title_box.pack(side="left", anchor="n")
         tk.Label(title_box, text="外汇现汇买入价", bg=COLOR_BG, fg=COLOR_TEXT,
-                 font=(FONT_FAMILY, 15, "bold")).pack(anchor="w")
+                 font=F_TITLE).pack(anchor="w")
         tk.Label(title_box, text="中国银行外汇牌价 · 现汇买入价 / 市场参考汇率",
                  bg=COLOR_BG, fg=COLOR_SUB,
-                 font=(FONT_FAMILY, 9)).pack(anchor="w", pady=(2, 0))
+                 font=F_SUBTITLE).pack(anchor="w", pady=(3, 0))
         self._build_currency_menu(header)
 
         # 可滚动卡片区：卡片数量多时滚动查看
-        body = tk.Frame(outer, bg=COLOR_BG)
+        body = tk.Frame(pad, bg=COLOR_BG)
         body.pack(fill="both", expand=True)
-        sb = tk.Scrollbar(body, orient="vertical", command=self._scroll_yview)
-        sb.pack(side="right", fill="y")
+        self.sb = tk.Scrollbar(body, orient="vertical", command=self._scroll_yview)
+        self.sb.pack(side="right", fill="y")
+        # 可滚动卡片区：卡片数量多时滚动查看。
+        # height=160 给画布一个较小的「请求高度」，真实高度由 pack expand
+        # 撑满剩余空间；否则画布默认请求高度过大，窗口缩到最小尺寸时
+        # 后打包的状态栏会被挤出窗口外（pack 不回缩已分配空间）。
         self.card_canvas = tk.Canvas(body, bg=COLOR_BG, highlightthickness=0,
-                                     yscrollcommand=sb.set)
+                                     height=160,
+                                     yscrollcommand=self._on_canvas_scroll)
         self.card_canvas.pack(side="left", fill="both", expand=True)
         self.cards_frame = tk.Frame(self.card_canvas, bg=COLOR_BG)
         self._cards_win = self.card_canvas.create_window(
@@ -250,38 +387,54 @@ class App(tk.Tk):
         self._rebuild_cards()
 
         # 状态栏：状态圆点 + 状态文字 + 刷新按钮
-        status_row = tk.Frame(outer, bg=COLOR_BG)
-        status_row.pack(fill="x", pady=(10, 0))
+        status_row = tk.Frame(pad, bg=COLOR_BG)
+        status_row.pack(fill="x", pady=(12, 0))
         self.dot_status = tk.Canvas(status_row, width=10, height=10, bg=COLOR_BG,
                                     highlightthickness=0)
-        self.dot_status.create_oval(1, 1, 9, 9, fill=COLOR_SUB, outline="",
+        self.dot_status.create_oval(2, 2, 8, 8, fill=COLOR_SUB, outline="",
                                     tags="dot")
-        self.dot_status.pack(side="left", padx=(2, 6))
+        self.dot_status.pack(side="left", padx=(2, 7))
         self.lbl_status = tk.Label(status_row, text="正在准备…", bg=COLOR_BG,
-                                   fg=COLOR_SUB, font=(FONT_FAMILY, 9),
+                                   fg=COLOR_SUB, font=F_STATUS,
                                    anchor="w", justify="left", wraplength=400)
         self.lbl_status.pack(side="left", fill="x", expand=True)
         self.lbl_status.bind("<Configure>", self._on_status_resize)
         self.btn_refresh = tk.Button(
             status_row, text="刷 新", command=self.refresh,
-            font=(FONT_FAMILY, 9, "bold"), bg=COLOR_ACCENT, fg="white",
+            font=F_BTN_MAIN, bg=COLOR_ACCENT, fg="white",
             activebackground=COLOR_ACCENT_DARK, activeforeground="white",
-            relief="flat", padx=14, pady=4, cursor="hand2")
+            disabledforeground=COLOR_REFRESH_DISABLED_FG,
+            relief="flat", padx=16, pady=4, cursor="hand2", takefocus=0,
+            bd=0)
         self.btn_refresh.pack(side="right", padx=(8, 0))
-        self.btn_refresh.bind("<Enter>",
-                              lambda e: e.widget.config(bg=COLOR_ACCENT_DARK))
-        self.btn_refresh.bind("<Leave>",
-                              lambda e: e.widget.config(bg=COLOR_ACCENT))
+        self.btn_refresh.bind("<Enter>", self._on_refresh_enter)
+        self.btn_refresh.bind("<Leave>", self._on_refresh_leave)
+
+    # ---------- 交互反馈（hover/禁用态） ----------
+
+    def _on_refresh_enter(self, _e):
+        # 禁用态不变色，避免「刷新中…」被 hover 提亮造成可点错觉
+        if str(self.btn_refresh["state"]) == "normal":
+            self.btn_refresh.config(bg=COLOR_ACCENT_DARK)
+
+    def _on_refresh_leave(self, _e):
+        if str(self.btn_refresh["state"]) == "normal":
+            self.btn_refresh.config(bg=COLOR_ACCENT)
 
     # ---------- 币种选择 ----------
 
     def _build_currency_menu(self, parent):
         """右上角「币种」下拉菜单：勾选要显示的币种。"""
         self.menu_btn = tk.Menubutton(
-            parent, text="币种 ▾", font=(FONT_FAMILY, 9, "bold"),
-            bg=COLOR_BTN, fg=COLOR_TEXT, activebackground=COLOR_BTN_ACTIVE,
-            relief="flat", padx=12, pady=3, cursor="hand2")
+            parent, text="币种 ▾", font=F_BTN_SMALL,
+            bg=COLOR_BTN, fg=COLOR_BTN_TEXT,
+            activebackground=COLOR_BTN_ACTIVE, activeforeground=COLOR_BTN_TEXT,
+            relief="flat", padx=12, pady=4, cursor="hand2", takefocus=0)
         self.menu_btn.pack(side="right", anchor="n")
+        self.menu_btn.bind("<Enter>",
+                           lambda e: e.widget.config(bg=COLOR_BTN_ACTIVE))
+        self.menu_btn.bind("<Leave>",
+                           lambda e: e.widget.config(bg=COLOR_BTN))
         menu = tk.Menu(self.menu_btn, tearoff=False)
         self.menu_btn.configure(menu=menu)
         self._menu_vars = {}
@@ -317,19 +470,52 @@ class App(tk.Tk):
         self._selected_curs = [CODE_TO_CURRENCY[c] for c in self._selected]
         for cur in self._selected_curs:
             self.cards[cur.code] = self._build_card(self.cards_frame, cur)
+        self._update_scrollbar()
 
     # ---------- 滚动 ----------
 
     def _scroll_yview(self, *args):
         self.card_canvas.yview(*args)
 
+    def _on_canvas_scroll(self, first, _last):
+        self.sb.set(first, _last)
+
     def _on_cards_resize(self, _e):
         self.card_canvas.configure(scrollregion=self.card_canvas.bbox("all"))
+        self._update_scrollbar()
+
+    def _update_scrollbar(self):
+        """内容不超过可视高度时隐藏滚动条（避免常驻灰条占宽、显冗余）。"""
+        try:
+            bb = self.card_canvas.bbox("all")
+            content_h = (bb[3] - bb[1]) if bb else 0
+            view_h = self.card_canvas.winfo_height()
+            need = view_h > 1 and content_h > view_h + 1
+        except tk.TclError:
+            return
+        if need == self._sb_visible:
+            return
+        self._sb_visible = need
+        if need:
+            # before= 保证滚动条重新插回画布右侧，且画布让出相应宽度
+            self.sb.pack(before=self.card_canvas, side="right", fill="y")
+        else:
+            self.sb.pack_forget()
+            self.card_canvas.yview_moveto(0)
 
     def _on_canvas_resize(self, e):
         self.card_canvas.itemconfigure(self._cards_win, width=e.width)
+        self._update_scrollbar()
+
+    def _on_outer_resize(self, e):
+        """窗口尺寸变化：内容区限最大宽度并水平居中。"""
+        self._content.place_configure(width=min(e.width, MAX_CONTENT_W))
+        self._update_scrollbar()
 
     def _on_mousewheel(self, e):
+        # 内容不满一屏（滚动条隐藏）时无需滚动，避免多余重绘
+        if not self._sb_visible:
+            return
         self.card_canvas.yview_scroll(int(-e.delta / 120), "units")
 
     # ---------- 窗口尺寸 ----------
@@ -350,6 +536,7 @@ class App(tk.Tk):
             total = min(total, int(self.winfo_screenheight() * 0.85))
             total = max(total, 380)
             self.geometry("%dx%d" % (self.winfo_width(), total))
+            self._update_scrollbar()
         except tk.TclError:
             pass
 
@@ -364,60 +551,72 @@ class App(tk.Tk):
     def _build_card(self, parent, cur):
         code, disp = cur.code, cur.display
         card = tk.Frame(parent, bg=COLOR_CARD, highlightbackground=COLOR_BORDER,
-                        highlightthickness=1, padx=14, pady=10)
+                        highlightthickness=1, padx=16, pady=12)
         card.pack(fill="x", pady=5)
 
         # 卡片头：货币符号 + 名称 + 标签 + 复制按钮
         top = tk.Frame(card, bg=COLOR_CARD)
         top.pack(fill="x")
+        # 符号标签不设固定宽度：₽、CHF、Mex$ 等宽符号/多字符符号
+        # 在 width=2 下会被截断显示不全，改为按内容自适应宽度
         sym = tk.Label(top, text=cur.symbol, bg=COLOR_CARD, fg=COLOR_ACCENT,
-                       font=(FONT_FAMILY, 12, "bold"), width=2, anchor="w")
-        sym.pack(side="left", padx=(0, 6))
+                       font=F_CARD_SYMBOL, anchor="w")
+        sym.pack(side="left", padx=(0, 8))
         title = tk.Label(top, text="%s（%s）" % (disp, code), bg=COLOR_CARD,
-                         fg=COLOR_TEXT, font=(FONT_FAMILY, 12, "bold"))
+                         fg=COLOR_TEXT, font=F_CARD_TITLE)
         title.pack(side="left")
         tag = tk.Label(top, text="", bg=COLOR_CARD, fg=COLOR_SUB,
-                       font=(FONT_FAMILY, 9))
+                       font=F_TAG)
         tag.pack(side="left", padx=8)
         btn_copy = tk.Button(top, text="复制", command=lambda c=code: self._copy(c),
-                             font=(FONT_FAMILY, 9), bg=COLOR_BTN, fg=COLOR_SUB,
-                             activebackground=COLOR_BTN_ACTIVE, relief="flat",
-                             padx=10, pady=2, cursor="hand2",
+                             font=F_BTN_SMALL, bg=COLOR_BTN, fg=COLOR_BTN_TEXT,
+                             activebackground=COLOR_BTN_ACTIVE,
+                             activeforeground=COLOR_BTN_TEXT_ACTIVE,
+                             relief="flat", padx=10, pady=2, cursor="hand2",
+                             takefocus=0, bd=0,
                              highlightthickness=1,
                              highlightbackground=COLOR_BORDER,
                              highlightcolor=COLOR_BORDER)
         btn_copy.pack(side="right")
-        btn_copy.bind("<Enter>", lambda e: e.widget.config(bg=COLOR_BTN_ACTIVE))
-        btn_copy.bind("<Leave>", lambda e: e.widget.config(bg=COLOR_BTN))
+        btn_copy.flashing = False   # 「已复制 ✓」反馈期间 hover 不变色
+        btn_copy.bind("<Enter>", lambda e: None if getattr(
+            e.widget, "flashing", False) else e.widget.config(
+            bg=COLOR_BTN_ACTIVE, fg=COLOR_BTN_TEXT_ACTIVE))
+        btn_copy.bind("<Leave>", lambda e: None if getattr(
+            e.widget, "flashing", False) else e.widget.config(
+            bg=COLOR_BTN, fg=COLOR_BTN_TEXT))
 
         # 分隔线：头部与数值区之间
-        tk.Frame(card, bg=COLOR_DIVIDER, height=1).pack(fill="x", pady=(8, 7))
+        tk.Frame(card, bg=COLOR_DIVIDER, height=1).pack(fill="x", pady=(10, 9))
 
         # 主数值：1 外币 = X 人民币（等宽数字，宽度固定避免刷新时跳动）
         mid = tk.Frame(card, bg=COLOR_CARD)
         mid.pack(fill="x")
         lbl_cur = tk.Label(mid, text="1 %s =" % disp, bg=COLOR_CARD, fg=COLOR_TEXT,
-                           font=(FONT_FAMILY, 11))
+                           font=F_UNIT)
         lbl_cur.pack(side="left")
         value = tk.Label(mid, text="--", bg=COLOR_CARD, fg=COLOR_ACCENT,
-                         font=(FONT_MONO, 20, "bold"), width=8, anchor="w")
+                         font=F_VALUE, width=7, anchor="w")
         value.pack(side="left", padx=3)
         lbl_cny = tk.Label(mid, text="人民币", bg=COLOR_CARD, fg=COLOR_TEXT,
-                           font=(FONT_FAMILY, 11))
+                           font=F_UNIT)
         lbl_cny.pack(side="left")
 
         # 来源信息
         src = tk.Label(card, text="来源：--", bg=COLOR_CARD, fg=COLOR_SUB,
-                       font=(FONT_FAMILY, 9), anchor="w")
-        src.pack(anchor="w", pady=(6, 0))
+                       font=F_SRC, anchor="w")
+        src.pack(anchor="w", pady=(7, 0))
 
-        # 双击任意位置复制
-        for w in (card, top, sym, title, tag, btn_copy, mid, lbl_cur, value,
+        # 双击任意位置复制；整卡可点区域统一 hand2 指针示意可交互。
+        # btn_copy 不参与双击绑定：其 command 在单击释放时已触发，
+        # 双击会导致 command×2 + 双击绑定×1 共 3 次重复复制。
+        for w in (card, top, sym, title, tag, mid, lbl_cur, value,
                   lbl_cny, src):
+            w.config(cursor="hand2")
             w.bind("<Double-Button-1>", lambda e, c=code: self._copy(c))
 
         return {"card": card, "tag": tag, "value": value, "src": src,
-                "btn_copy": btn_copy, "rate1": None}
+                "btn_copy": btn_copy, "rate1": None, "flash_after": None}
 
     # ---------- 数据刷新 ----------
 
@@ -425,7 +624,8 @@ class App(tk.Tk):
         if self._fetching:
             return
         self._fetching = True
-        self.btn_refresh.config(state="disabled", text="刷新中…")
+        self.btn_refresh.config(state="disabled", text="刷新中…",
+                                bg=COLOR_REFRESH_DISABLED_BG)
         self._status_base = "正在获取最新牌价，请稍候…"
         self._status_fg_state = "busy"
         self._render_status()
@@ -433,7 +633,8 @@ class App(tk.Tk):
 
     def _worker(self):
         try:
-            rows, err = fetch_all(self._selected)
+            # 传快照：避免工作线程读取时 UI 线程恰好增删 _selected
+            rows, err = fetch_all(list(self._selected))
             self.result_q.put({"rows": rows, "error": err})
         except Exception as e:
             logging.exception("抓取工作线程异常")
@@ -449,7 +650,7 @@ class App(tk.Tk):
 
     def _apply_result(self, msg):
         self._fetching = False
-        self.btn_refresh.config(state="normal", text="刷 新")
+        self.btn_refresh.config(state="normal", text="刷 新", bg=COLOR_ACCENT)
 
         rows = msg.get("rows") or {}
         kept_old = False
@@ -473,13 +674,11 @@ class App(tk.Tk):
                     kept_old = True
                     c["tag"].config(text="◷ 上次数据", fg=COLOR_SUB)
 
-        now = datetime.now().strftime("%H:%M:%S")
         if msg.get("error"):
             self._status_base = msg["error"]
             if kept_old:
                 self._status_base += " · 已保留上次成功数据"
-            self._status_fg_state = "warn"
-            self._last_update = now
+            self._status_fg_state = "err"
         else:
             self._status_base = "点击「刷新」或按 F5 可手动更新"
             self._status_fg_state = "sub"
@@ -504,8 +703,7 @@ class App(tk.Tk):
 
     def _render_status(self):
         state = self._status_fg_state
-        fg = {"sub": COLOR_SUB, "warn": COLOR_WARN, "busy": COLOR_ACCENT}.get(
-            state, COLOR_SUB)
+        fg = _STATUS_DOT.get(state, COLOR_SUB)   # 圆点与文字共用同一配色表
         text = self._status_base
         if self._last_update:
             text = "%s · 更新于 %s" % (text, self._last_update)
@@ -532,22 +730,34 @@ class App(tk.Tk):
             self.clipboard_append(s)
         disp = self._disp_by_code[code]
         self._status_base = "已复制：%s（1 %s 兑人民币）" % (s, disp)
-        self._status_fg_state = "sub"
+        self._status_fg_state = "ok"
         self._render_status()
         self._flash_copy(code)
 
     def _flash_copy(self, code):
-        btn = self.cards[code]["btn_copy"]
-        btn.config(text="已复制 ✓")
+        c = self.cards[code]
+        btn = c["btn_copy"]
+        # 复制成功：按钮短暂变为淡绿底 + 绿字，反馈更明显；
+        # 反馈期间挂起 hover 变色，避免绿色被 hover 规则覆盖
+        btn.flashing = True
+        btn.config(text="已复制 ✓", bg=COLOR_OK_SOFT, fg=COLOR_OK)
+        # 连续快速复制时取消上一次的还原回调，避免按钮文字被提前还原
+        prev = c.get("flash_after")
+        if prev:
+            try:
+                self.after_cancel(prev)
+            except Exception:
+                pass
 
         def restore():
+            btn.flashing = False
             try:
                 if self.winfo_exists():
-                    btn.config(text="复制")
+                    btn.config(text="复制", bg=COLOR_BTN, fg=COLOR_BTN_TEXT)
             except tk.TclError:
                 pass
 
-        self.after(1200, restore)
+        c["flash_after"] = self.after(1200, restore)
 
 
 def _setup_logging():
@@ -574,17 +784,40 @@ def _setup_logging():
 
 
 def _ensure_single_instance():
-    """单实例：重复启动时唤醒已有窗口并退出，避免开多个窗口。"""
+    """单实例：重复启动时唤醒已有窗口并退出，避免开多个窗口。
+
+    句柄说明：
+    - 首个实例创建的互斥锁句柄故意不 CloseHandle——须持有到进程结束才能
+      维持单实例；进程退出时由操作系统回收，非句柄泄漏。
+    - 互斥锁用「Local\\」命名空间（每登录会话独立）：同一用户多会话
+      （如远程桌面）各开各的实例，互不误伤；「Global\\」会跨会话误判。
+    """
     if "--selftest" in sys.argv:
         return True   # 自动化测试模式不受单实例限制
-    ctypes.windll.kernel32.SetLastError(0)
-    ctypes.windll.kernel32.CreateMutexW(None, False, "Local\\" + APP_TITLE)
-    if ctypes.windll.kernel32.GetLastError() != 183:   # ERROR_ALREADY_EXISTS
+    # use_last_error=True：ctypes 在两次外部调用之间可能执行内部 Win32 调用
+    # 而覆盖进程级 last error，必须用线程本地副本 ctypes.get_last_error()
+    # 读取，直接调 kernel32.GetLastError() 不可靠。
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    user32 = ctypes.windll.user32
+    # x64 正确性：HANDLE/HWND 为 64 位，restype 默认 c_int 会截断——
+    # FindWindowW 返回值截断后可能变成错误的非零值，ShowWindow 会作用到
+    # 无关窗口。c_void_p 失败时返回 None，`if hwnd` 判空语义不变。
+    kernel32.CreateMutexW.argtypes = [ctypes.wintypes.HANDLE,
+                                      ctypes.wintypes.BOOL,
+                                      ctypes.wintypes.LPCWSTR]
+    kernel32.CreateMutexW.restype = ctypes.wintypes.HANDLE
+    user32.FindWindowW.argtypes = [ctypes.wintypes.LPCWSTR,
+                                   ctypes.wintypes.LPCWSTR]
+    user32.FindWindowW.restype = ctypes.wintypes.HWND
+    user32.ShowWindow.argtypes = [ctypes.wintypes.HWND, ctypes.c_int]
+    user32.SetForegroundWindow.argtypes = [ctypes.wintypes.HWND]
+    kernel32.CreateMutexW(None, False, "Local\\" + APP_TITLE)
+    if ctypes.get_last_error() != 183:   # ERROR_ALREADY_EXISTS
         return True
-    hwnd = ctypes.windll.user32.FindWindowW(None, APP_TITLE)
-    if hwnd:
-        ctypes.windll.user32.ShowWindow(hwnd, 9)        # SW_RESTORE
-        ctypes.windll.user32.SetForegroundWindow(hwnd)
+    hwnd = user32.FindWindowW(None, APP_TITLE)
+    if hwnd:   # c_void_p：失败返回 None
+        user32.ShowWindow(hwnd, 9)        # SW_RESTORE
+        user32.SetForegroundWindow(hwnd)
     else:
         # 理论上不应发生（mutex 存在则窗口应已创建），兜底提示而非静默退出
         ctypes.windll.user32.MessageBoxW(
@@ -602,9 +835,15 @@ def main():
         logging.warning("已开启 --insecure：证书校验失败时将降级为不校验证书")
     if not _ensure_single_instance():
         return
-    # 高分屏下界面更清晰：Per-Monitor V2（Win10 1803+），旧系统回退到 System DPI aware
+    # 高分屏下界面更清晰：Per-Monitor V2（Win10 1803+），旧系统回退到 System DPI aware。
+    # 注意：DPI_AWARENESS_CONTEXT_* 是指针大小的句柄（-4），必须按 c_void_p 传参，
+    # 否则在 64 位进程上默认按 32 位 c_int 传参导致调用静默失败、界面发虚。
+    user32 = ctypes.windll.user32
     try:
-        ctypes.windll.user32.SetProcessDpiAwarenessContext(-4)
+        user32.SetProcessDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+        user32.SetProcessDpiAwarenessContext.restype = ctypes.c_void_p
+        if not user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
+            raise OSError("SetProcessDpiAwarenessContext 调用失败")
     except Exception:
         try:
             ctypes.windll.shcore.SetProcessDpiAwareness(1)
@@ -614,6 +853,12 @@ def main():
     if "--selftest" in sys.argv:
         app.after(6000, app.destroy)   # 自动化冒烟测试：6 秒后自动退出
     app.mainloop()
+    # 线程池收尾：fetcher 的 ThreadPoolExecutor 工作线程为非 daemon，
+    # 解释器退出时会 join 仍在进行的网络请求（15s 超时 × 重试，最长约 30s），
+    # 导致窗口关闭后进程滞留、期间单实例互斥锁未释放（期间再次启动会被
+    # 误判为重复实例）。此时界面已销毁、配置已在 _on_close 落盘、
+    # 日志按条即时落盘，直接结束进程安全。
+    os._exit(0)
 
 
 if __name__ == "__main__":

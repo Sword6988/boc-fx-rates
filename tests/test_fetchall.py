@@ -215,6 +215,101 @@ def test_parse_wanted_filter():
     print("parse wanted 过滤/全量解析测试通过")
 
 
+# ------------------------- 配置读取健壮性 -------------------------
+
+def _write_cfg(content):
+    """写入临时 config.json 并返回一个替换 app._config_path 的函数。"""
+    import tempfile
+    d = tempfile.mkdtemp(prefix="fx_cfg_test_")
+    path = os.path.join(d, "config.json")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+
+    def fake_path():
+        return path
+    return fake_path
+
+
+def _load_with(content):
+    import app as app_mod
+    with mock.patch.object(app_mod, "_config_path", _write_cfg(content)):
+        return app_mod._load_config()
+
+
+def test_load_config_unhashable_selected():
+    """selected 含不可哈希元素（dict/list）时不应崩溃，仅保留合法项。"""
+    cfg = _load_with('{"selected": [{"a": 1}, ["USD"], "USD"]}')
+    assert cfg["selected"] == ["USD"], "非法元素应被过滤，仅剩合法项"
+    # 全部非法时回退默认币种
+    cfg2 = _load_with('{"selected": [{"a": 1}, 42]}')
+    assert cfg2["selected"] == [cur.code for cur in fetcher.CURRENCIES]
+    print("config 不可哈希 selected 防御测试通过")
+
+
+def test_load_config_dedup_and_filter():
+    """selected 去重、过滤非法代码、保留合法项。"""
+    cfg = _load_with('{"selected": ["USD", "USD", "XXX", "RUB"]}')
+    assert cfg["selected"] == ["USD", "RUB"]
+    print("config selected 去重/过滤测试通过")
+
+
+def test_load_config_malformed_geometry():
+    """geometry 为畸形字符串/非字符串时按无记忆处理，合法值保留。"""
+    assert _load_config_geometry_is_none('{"geometry": "abc; drop table x"}')
+    assert _load_config_geometry_is_none('{"geometry": "9999999999"}')
+    assert _load_config_geometry_is_none('{"geometry": "-100x200"}')
+    assert _load_config_geometry_is_none('{"geometry": 123}')
+    assert _load_config_geometry_is_none('{"geometry": ["640x480"]}')
+    assert _load_config_geometry_is_none('{"geometry": "x480"}')
+    import app as app_mod
+    for geo in ("640x480", "1024x768+10-5", "440x380-20+30"):
+        with mock.patch.object(app_mod, "_config_path",
+                               _write_cfg('{"geometry": "%s"}' % geo)):
+            assert app_mod._load_config()["geometry"] == geo, geo
+    print("config 畸形 geometry 防御测试通过")
+
+
+def _load_config_geometry_is_none(content):
+    import app as app_mod
+    with mock.patch.object(app_mod, "_config_path", _write_cfg(content)):
+        return app_mod._load_config()["geometry"] is None
+
+
+def test_load_config_broken_json():
+    """JSON 损坏时返回默认配置。"""
+    cfg = _load_with("{not valid json")
+    assert cfg["selected"] == [cur.code for cur in fetcher.CURRENCIES]
+    assert cfg["geometry"] is None
+    print("config 损坏 JSON 回退默认测试通过")
+
+
+# ------------------------- geometry 屏外钳制 -------------------------
+
+def test_clamp_geometry():
+    """屏外坐标钳回虚拟屏幕内（保留 80px 可见），屏内坐标不变。"""
+    from app import _clamp_geometry
+    pri = (0, 0, 1920, 1080)
+    # 屏外大坐标 → 钳到右/下边界内 80px
+    assert _clamp_geometry("440x380+99999+99999", screen=pri) == \
+        "440x380+1840+1000"
+    # 负方向屏外 → 钳到左/上边界内 80px
+    assert _clamp_geometry("440x380-500-500", screen=pri) == \
+        "440x380-360-300"
+    # 屏内坐标原样返回（正常使用行为不变）
+    assert _clamp_geometry("440x380+100+100", screen=pri) == \
+        "440x380+100+100"
+    assert _clamp_geometry("640x480+1760+960", screen=pri) == \
+        "640x480+1760+960"   # 右下角贴边（恰好在 hi 边界内）
+    # 多屏：虚拟屏起点非 0（如左侧副屏）时按虚拟屏整体范围钳制
+    assert _clamp_geometry("440x380+99999+99999",
+                           screen=(-1920, 0, 3840, 1080)) == \
+        "440x380+1840+1000"
+    # 无位置部分（仅 WxH）/ 畸形格式 → 原样返回
+    assert _clamp_geometry("640x480", screen=pri) == "640x480"
+    assert _clamp_geometry("garbage", screen=pri) == "garbage"
+    print("geometry 屏外钳制测试通过")
+
+
 if __name__ == "__main__":
     test_fetch_all_all_ok()
     test_fetch_all_boc_missing_currency()
@@ -230,4 +325,9 @@ if __name__ == "__main__":
     test_parse_header_column_offset()
     test_parse_default_column_order()
     test_parse_wanted_filter()
+    test_load_config_unhashable_selected()
+    test_load_config_dedup_and_filter()
+    test_load_config_malformed_geometry()
+    test_load_config_broken_json()
+    test_clamp_geometry()
     print("全部 fetch_all/工具函数离线测试通过")

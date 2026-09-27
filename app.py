@@ -727,11 +727,11 @@ class App(tk.Tk):
     def _open_close_dialog(self):
         """关闭方式选择对话框（模态，与主界面同一套设计语言）。
 
-        视觉规范对齐主界面：品牌红 ¥ 徽标 + 17px 粗标题（同头部层级）、
-        次级灰说明文字、卡片内同款分隔线、主（红底）/次（幽灵描边）两级
-        按钮；窗口启用 Win11 DWM 圆角 + 系统投影，无投影的旧系统回退
-        1px 描边卡片观感。Esc / 回车 / 关闭对话框均按推荐项「最小化到
-        系统托盘」处理，不会造成误退出。
+        视觉规范对齐主界面：次级说明文字、卡片内同款分隔线、主（红底）/
+        次（幽灵描边）两级按钮；窗口启用 Win11 DWM 圆角 + 系统投影，
+        无投影的旧系统回退 1px 描边卡片观感。标题由标题栏承载，正文只
+        放说明与操作，避免重复。Esc / 回车 / 关闭对话框均按推荐项
+        「最小化到系统托盘」处理，不会造成误退出。
         """
         dlg = tk.Toplevel(self, bg=COLOR_CARD, highlightthickness=1,
                           highlightbackground=COLOR_BORDER)
@@ -750,26 +750,15 @@ class App(tk.Tk):
         pad = tk.Frame(dlg, bg=COLOR_CARD, padx=26, pady=22)
         pad.pack(fill="both", expand=True)
 
-        # 头部：品牌徽标 + 标题（与主界面头部同款徽标、同字级层级）
-        head = tk.Frame(pad, bg=COLOR_CARD)
-        head.pack(fill="x")
-        mark = tk.Canvas(head, width=32, height=32, bg=COLOR_CARD,
-                         highlightthickness=0)
-        mark.pack(side="left", padx=(0, 10))
-        _rounded_rect(mark, 1, 1, 31, 31, 9, fill=COLOR_ACCENT, outline="")
-        mark.create_text(16, 17, text="¥", fill="white",
-                         font=(FONT_FAMILY, 13, "bold"))
-        tk.Label(head, text="关闭程序", bg=COLOR_CARD, fg=COLOR_TEXT,
-                 font=F_TITLE).pack(side="left")
-
-        # 说明文字：窄屏时按屏宽收窄折行，保证小屏完整可读
+        # 说明文字：字号 11（大于正文次级文字，弹窗独立阅读场景），
+        # 窄屏时按屏宽收窄折行，保证小屏完整可读
         wrap = min(348, max(240, self.winfo_screenwidth() - 160))
         tk.Label(pad, text="「最小化到系统托盘」后程序在后台保持运行，"
                            "点击托盘图标可随时打开并自动更新牌价；"
                            "「直接退出」将关闭程序。",
-                 bg=COLOR_CARD, fg=COLOR_SUB, font=F_TAG,
+                 bg=COLOR_CARD, fg=COLOR_SUB, font=(FONT_FAMILY, 11),
                  wraplength=wrap, justify="left",
-                 anchor="w").pack(fill="x", pady=(12, 18))
+                 anchor="w").pack(fill="x", pady=(0, 18))
 
         # 分隔线：与卡片内部同款
         tk.Frame(pad, bg=COLOR_DIVIDER, height=1).pack(fill="x")

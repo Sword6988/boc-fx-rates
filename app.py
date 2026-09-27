@@ -95,7 +95,14 @@ F_STATUS = (FONT_FAMILY, 9)            # 状态行
 F_BTN_MAIN = (FONT_FAMILY, 10, "bold") # 主按钮（刷新）
 F_BTN_SMALL = (FONT_FAMILY, 9)         # 次级按钮（复制/币种菜单）
 
-MAX_CONTENT_W = 760   # 内容区最大宽度（超出后整体居中，避免卡片被拉得过宽）
+# 响应式多列卡片布局参数：
+# 卡片用 grid 排布，列数由可用宽度自动决定（1/2/3 列），列宽均分剩余空间。
+# 内容区上限 = 3 列满宽所需的窗口宽度（3×理想宽 + 2×间距 + 两侧 pad 36），
+# 再宽则整体居中，避免卡片列被无限拉伸。
+CARD_IDEAL_W = 350     # 单卡理想宽度（列数判定阈值，留 10px 余量防临界差一像素）
+CARD_GAP = 12          # 卡片间距
+MAX_COLS = 3           # 最大列数
+MAX_CONTENT_W = MAX_COLS * CARD_IDEAL_W + (MAX_COLS - 1) * CARD_GAP + 36
 
 
 def _set_clipboard_win(text):
@@ -228,6 +235,8 @@ class App(tk.Tk):
         self._status_fg_state = "sub"
         self._last_update = ""
         self._sb_visible = True     # 滚动条当前是否显示（按需隐藏）
+        self._cols = 1              # 卡片当前列数（响应式，随窗口宽度变化）
+        self._relayout_job = None   # 列数变化去抖重排的 after 任务句柄
         self._disp_by_code = {cur.code: cur.display for cur in ALL_CURRENCIES}
         # 选中币种与窗口尺寸（持久化到 %APPDATA%）
         # _load_config 已保证 selected 非空且均为合法币种代码
@@ -499,7 +508,53 @@ class App(tk.Tk):
         # 新增币种时，先用会话内已有数据即时渲染（标注「上次数据」），
         # 避免等待这次网络请求期间显示「--」
         self._render_session()
+        self._layout_cards()
         self._update_scrollbar()
+
+    # ---------- 响应式多列布局 ----------
+
+    def _desired_cols(self, canvas_w):
+        """按画布可用宽度计算卡片段数：放得下几张理想宽度的卡就排几列。
+
+        公式：cols = (可用宽 + 间距) // (理想卡宽 + 间距)，钳制到 1..MAX_COLS。
+        720 宽的默认窗口 → 1 列；约 790+ → 2 列；1140+（上限宽）→ 3 列。
+        """
+        cols = (canvas_w + CARD_GAP) // (CARD_IDEAL_W + CARD_GAP)
+        return max(1, min(MAX_COLS, int(cols)))
+
+    def _schedule_relayout(self, canvas_w):
+        """窗口宽度变化时按需重排列数（去抖 150ms，避免拖拽中频繁重排跳动）。"""
+        cols = self._desired_cols(canvas_w)
+        if cols == self._cols:
+            return
+        if self._relayout_job is not None:
+            self.after_cancel(self._relayout_job)
+        self._relayout_job = self.after(150, lambda: self._apply_cols(cols))
+
+    def _apply_cols(self, cols):
+        self._relayout_job = None
+        if cols == self._cols or not self.winfo_exists():
+            return
+        self._cols = cols
+        self._layout_cards()
+        self._update_scrollbar()
+
+    def _layout_cards(self):
+        """将当前卡片按 _cols 列用 grid 重排（行优先），列宽均分、同行等高。"""
+        for info in self.cards.values():
+            info["card"].grid_forget()
+        # 只给使用中的列配重；空列必须清零权重，否则 grid 仍会把宽度
+        # 均分给带权重的空列，导致缩窗后卡片收不满（实测踩坑）。
+        for col in range(MAX_COLS):
+            if col < self._cols:
+                self.cards_frame.columnconfigure(col, weight=1,
+                                                 uniform="cardcol")
+            else:
+                self.cards_frame.columnconfigure(col, weight=0, uniform="")
+        for i, cur in enumerate(self._selected_curs):
+            self.cards[cur.code]["card"].grid(
+                row=i // self._cols, column=i % self._cols,
+                sticky="nsew", padx=5, pady=5)
 
     # ---------- 滚动 ----------
 
@@ -534,6 +589,7 @@ class App(tk.Tk):
 
     def _on_canvas_resize(self, e):
         self.card_canvas.itemconfigure(self._cards_win, width=e.width)
+        self._schedule_relayout(e.width)
         self._update_scrollbar()
 
     def _on_outer_resize(self, e):
@@ -581,7 +637,7 @@ class App(tk.Tk):
         code, disp = cur.code, cur.display
         card = tk.Frame(parent, bg=COLOR_CARD, highlightbackground=COLOR_BORDER,
                         highlightthickness=1, padx=18, pady=14)
-        card.pack(fill="x", pady=6)
+        # 不在此处 pack/grid：位置由 _layout_cards 按响应式列数统一排布
 
         # 卡片头：货币符号 + 名称 + 来源胶囊 + 复制按钮
         top = tk.Frame(card, bg=COLOR_CARD)

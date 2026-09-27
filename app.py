@@ -91,7 +91,6 @@ F_CARD_SYMBOL = (FONT_FAMILY, 13, "bold") # 卡片货币符号
 F_TAG = (FONT_FAMILY, 9)               # 卡片来源胶囊
 F_VALUE = (FONT_MONO, 22, "bold")      # 主数值（等宽，防刷新跳动）
 F_UNIT = (FONT_FAMILY, 11)             # 「1 外币 =」「人民币」单位
-F_SRC = (FONT_FAMILY, 9)               # 来源行
 F_STATUS = (FONT_FAMILY, 9)            # 状态行
 F_BTN_MAIN = (FONT_FAMILY, 10, "bold") # 主按钮（刷新）
 F_BTN_SMALL = (FONT_FAMILY, 9)         # 次级按钮（复制/币种菜单）
@@ -630,20 +629,15 @@ class App(tk.Tk):
                            font=F_UNIT)
         lbl_cny.pack(side="left")
 
-        # 来源信息
-        src = tk.Label(card, text="来源：--", bg=COLOR_CARD, fg=COLOR_SUB,
-                       font=F_SRC, anchor="w")
-        src.pack(anchor="w", pady=(8, 0))
-
         # 双击任意位置复制；整卡可点区域统一 hand2 指针示意可交互。
         # btn_copy 不参与双击绑定：其 command 在单击释放时已触发，
         # 双击会导致 command×2 + 双击绑定×1 共 3 次重复复制。
         for w in (card, top, sym, title, tag, mid, lbl_cur, value,
-                  lbl_cny, src):
+                  lbl_cny):
             w.config(cursor="hand2")
             w.bind("<Double-Button-1>", lambda e, c=code: self._copy(c))
 
-        return {"card": card, "tag": tag, "value": value, "src": src,
+        return {"card": card, "tag": tag, "value": value,
                 "btn_copy": btn_copy, "rate1": None, "flash_after": None}
 
     # ---------- 数据刷新 ----------
@@ -660,7 +654,6 @@ class App(tk.Tk):
                 continue
             c["rate1"] = d["rate1"]
             c["value"].config(text=fmt(d["rate1"]))
-            c["src"].config(text="来源：%s" % d["source"])
             c["tag"].config(text="◷ 上次数据", fg=COLOR_TAG_STALE_FG,
                             bg=COLOR_TAG_STALE_BG)
 
@@ -717,7 +710,6 @@ class App(tk.Tk):
                 self._session[cur.code] = d
                 c["rate1"] = d["rate1"]
                 c["value"].config(text=fmt(d["rate1"]))
-                c["src"].config(text="来源：%s" % d["source"])
                 if d.get("fallback"):
                     c["tag"].config(text="● 备用源参考", fg=COLOR_TAG_FALLBACK,
                                     bg=COLOR_TAG_FALLBACK_BG)
@@ -727,7 +719,6 @@ class App(tk.Tk):
             else:
                 if c["rate1"] is None:
                     c["value"].config(text="--")
-                    c["src"].config(text="可点击「刷新」重试")
                     c["tag"].config(text="", bg=COLOR_CARD)
                 else:
                     kept_old = True

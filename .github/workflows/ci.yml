@@ -29,8 +29,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
+          # pip 缓存：PyInstaller 安装命中缓存，省 1 分钟左右
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
       - name: Install PyInstaller
-        run: pip install pyinstaller==6.22.2
+        run: pip install -r requirements-dev.txt
+      # GUI 冒烟：exe 构建前先在 runner 上验证程序能启动（含 tkinter/DPI/
+      # 单实例/界面构建全链路），6 秒后自动退出；失败则不产出新 Release
+      - name: Smoke test (selftest)
+        run: python boc_fx_rates.py --selftest
       - name: Build exe
         run: >
           python -m PyInstaller --onefile --windowed --clean

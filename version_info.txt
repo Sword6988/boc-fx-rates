@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 4, 0, 0),
-    prodvers=(1, 4, 0, 0),
+    filevers=(1, 4, 1, 0),
+    prodvers=(1, 4, 1, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -17,12 +17,12 @@ VSVersionInfo(
           '080404b0',
           [StringStruct('CompanyName', ''),
            StringStruct('FileDescription', '外汇现汇买入价查询'),
-           StringStruct('FileVersion', '1.4.0.0'),
+           StringStruct('FileVersion', '1.4.1.0'),
            StringStruct('InternalName', '外汇现汇买入价查询'),
            StringStruct('LegalCopyright', ''),
            StringStruct('OriginalFilename', '外汇现汇买入价查询.exe'),
            StringStruct('ProductName', '外汇现汇买入价查询'),
-           StringStruct('ProductVersion', '1.4.0.0')]
+           StringStruct('ProductVersion', '1.4.1.0')]
         )
       ]
     ),

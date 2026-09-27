@@ -219,6 +219,10 @@ class App(tk.Tk):
         self.cards = {}
         self._fetching = False
         self._requested = []        # 本次抓取对应的选择快照（检测抓取期间的选择变更）
+        # 会话级数据复用：本次运行已成功取到的币种数据（纯内存，进程退出即
+        # 消失，不落盘）。切换币种重建卡片时先用它即时渲染旧值（标注
+        # 「上次数据」），避免等待网络期间显示「--」。
+        self._session = {}
         self._status_base = "正在准备…"
         self._status_fg_state = "sub"
         self._last_update = ""
@@ -382,6 +386,9 @@ class App(tk.Tk):
         self._selected_curs = [CODE_TO_CURRENCY[c] for c in self._selected]
         for cur in self._selected_curs:
             self.cards[cur.code] = self._build_card(self.cards_frame, cur)
+        # 新增币种时，先用会话内已有数据即时渲染（标注「上次数据」），
+        # 避免等待这次网络请求期间显示「--」
+        self._render_session()
         self._update_scrollbar()
 
     # ---------- 滚动 ----------
@@ -530,6 +537,22 @@ class App(tk.Tk):
 
     # ---------- 数据刷新 ----------
 
+    def _render_session(self):
+        """用会话内已有数据即时渲染卡片（重建卡片后调用）。
+
+        只填充当前尚无数据的卡片（rate1 is None，即新建卡片）；
+        渲染结果标注「上次数据」，随后的 refresh 成功后会被真实来源覆盖。
+        """
+        for code, c in self.cards.items():
+            d = self._session.get(code)
+            if not d or c["rate1"] is not None:
+                continue
+            c["rate1"] = d["rate1"]
+            c["value"].config(text=fmt(d["rate1"]))
+            c["src"].config(text="来源：%s" % d["source"])
+            c["tag"].config(text="◷ 上次数据", fg=COLOR_TAG_STALE_FG,
+                            bg=COLOR_TAG_STALE_BG)
+
     def refresh(self):
         if self._fetching:
             return
@@ -580,6 +603,7 @@ class App(tk.Tk):
             c = self.cards[cur.code]
             d = rows.get(cur.code)
             if d:
+                self._session[cur.code] = d
                 c["rate1"] = d["rate1"]
                 c["value"].config(text=fmt(d["rate1"]))
                 c["src"].config(text="来源：%s" % d["source"])

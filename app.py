@@ -881,26 +881,37 @@ class App(tk.Tk):
             self._tray.shutdown()
         super().destroy()
 
+    # ---------- 卡片统一排版规范 ----------
+    # 所有卡片共用同一组常量与对齐规则，保证任意币种、任意数据状态下
+    # 排版一致：
+    # - 结构固定：头部行（符号+名称+来源胶囊+复制）→ 分隔线 → 数值行
+    #   （单位+数值+单位），行内元素全部底边对齐（anchor="s"）——同排
+    #   不同字号的文字共用一条视觉底线，避免居中对齐造成的基线漂浮；
+    # - 间距统一：符号/名称/胶囊 6px，数值两侧 4/5px，分隔线上下 11px；
+    # - 数值列宽固定 8 字符（等宽字体）：容纳 fmt 对 <0.01 汇率的 8 字符
+    #   输出（如 KRW「0.005200」），且数据从「--」变为数值、6~8 字符
+    #   长度变化时「人民币」位置保持不动，布局稳定。
+
     def _build_card(self, parent, cur):
         code, disp = cur.code, cur.display
         card = tk.Frame(parent, bg=COLOR_CARD, highlightbackground=COLOR_BORDER,
                         highlightthickness=1, padx=16, pady=14)
         # 不在此处 pack/grid：位置由 _layout_cards 按响应式列数统一排布
 
-        # 卡片头：货币符号 + 名称 + 来源胶囊 + 复制按钮
+        # 头部行：货币符号 + 名称 + 来源胶囊 + 复制按钮（底边对齐）
         top = tk.Frame(card, bg=COLOR_CARD)
         top.pack(fill="x")
         # 符号标签不设固定宽度：₽、CHF、Mex$ 等宽符号/多字符符号
         # 在 width=2 下会被截断显示不全，改为按内容自适应宽度
         sym = tk.Label(top, text=cur.symbol, bg=COLOR_CARD, fg=COLOR_ACCENT,
-                       font=F_CARD_SYMBOL, anchor="w")
-        sym.pack(side="left", padx=(0, 6))
+                       font=F_CARD_SYMBOL, anchor="s")
+        sym.pack(side="left", anchor="s", padx=(0, 6))
         title = tk.Label(top, text="%s（%s）" % (disp, code), bg=COLOR_CARD,
-                         fg=COLOR_TEXT, font=F_CARD_TITLE)
-        title.pack(side="left")
+                         fg=COLOR_TEXT, font=F_CARD_TITLE, anchor="s")
+        title.pack(side="left", anchor="s", pady=(0, 1))
         tag = tk.Label(top, text="", bg=COLOR_CARD, fg=COLOR_SUB,
-                       font=F_TAG, padx=6, pady=2)
-        tag.pack(side="left", padx=(6, 0))
+                       font=F_TAG, padx=6, pady=2, anchor="s")
+        tag.pack(side="left", anchor="s", padx=(6, 0), pady=(0, 1))
         btn_copy = tk.Button(top, text="复制", command=lambda c=code: self._copy(c),
                              font=F_BTN_SMALL, bg=COLOR_CARD, fg=COLOR_BTN_TEXT,
                              activebackground=COLOR_BTN_ACTIVE,
@@ -910,30 +921,30 @@ class App(tk.Tk):
                              highlightthickness=1,
                              highlightbackground=COLOR_BORDER,
                              highlightcolor=COLOR_BORDER)
-        btn_copy.pack(side="right")
+        btn_copy.pack(side="right", anchor="s")
         btn_copy.flashing = False   # 「已复制 ✓」反馈期间 hover 不变色
         _bind_hover(btn_copy,
                     (COLOR_CARD, COLOR_BTN_TEXT),
                     (COLOR_BTN_ACTIVE, COLOR_BTN_TEXT_ACTIVE),
                     guard=lambda w: not getattr(w, "flashing", False))
 
-        # 分隔线：头部与数值区之间
-        tk.Frame(card, bg=COLOR_DIVIDER, height=1).pack(fill="x", pady=(11, 10))
+        # 分隔线：头部与数值区之间（上下等距）
+        tk.Frame(card, bg=COLOR_DIVIDER, height=1).pack(fill="x", pady=11)
 
-        # 主数值：1 外币 = X 人民币（等宽数字，宽度固定避免刷新时跳动）。
-        # 宽度 8：fmt 对 <0.01 的汇率输出 8 字符（如 KRW「0.005200」），
-        # 旧值 7（118px）会截掉末位（实测自然宽 134px，width=8 恰好容纳）。
+        # 主数值行：1 外币 = X 人民币（等宽数字，宽度固定避免刷新时跳动）。
+        # 单位文字底边对齐数值（anchor="s" + 少量垫高），与小号文字共用
+        # 数字的视觉基线，不再悬浮于行中央。
         mid = tk.Frame(card, bg=COLOR_CARD)
         mid.pack(fill="x")
         lbl_cur = tk.Label(mid, text="1 %s =" % disp, bg=COLOR_CARD, fg=COLOR_TEXT,
-                           font=F_UNIT)
-        lbl_cur.pack(side="left")
+                           font=F_UNIT, anchor="s")
+        lbl_cur.pack(side="left", anchor="s", pady=(0, 4))
         value = tk.Label(mid, text="--", bg=COLOR_CARD, fg=COLOR_ACCENT,
                          font=F_VALUE, width=8, anchor="w")
-        value.pack(side="left", padx=3)
+        value.pack(side="left", padx=(4, 5))
         lbl_cny = tk.Label(mid, text="人民币", bg=COLOR_CARD, fg=COLOR_TEXT,
-                           font=F_UNIT)
-        lbl_cny.pack(side="left")
+                           font=F_UNIT, anchor="s")
+        lbl_cny.pack(side="left", anchor="s", pady=(0, 4))
 
         # 双击任意位置复制；整卡可点区域统一 hand2 指针示意可交互。
         # btn_copy 不参与双击绑定：其 command 在单击释放时已触发，

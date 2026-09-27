@@ -96,10 +96,10 @@ F_BTN_MAIN = (FONT_FAMILY, 10, "bold") # 主按钮（刷新）
 F_BTN_SMALL = (FONT_FAMILY, 9)         # 次级按钮（复制/币种菜单）
 
 # 响应式多列卡片布局参数：
-# 卡片用 grid 排布，列数由可用宽度自动决定（1/2/3 列），列宽均分剩余空间。
-# 内容区上限 = 3 列满宽所需的窗口宽度（3×理想宽 + 2×间距 + 两侧 pad 36），
-# 再宽则整体居中，避免卡片列被无限拉伸。
-CARD_IDEAL_W = 350     # 单卡理想宽度（列数判定阈值，留 10px 余量防临界差一像素）
+# 卡片用 grid 排布，列数由可用宽度与卡片实测自然宽度共同决定（1/2/3 列），
+# 列宽均分。内容区下限保证窄窗口可用；实际上限按最宽卡片的自然宽度
+# 联动放大（_content_max_w），保证满列数时任何币种名称都不截断。
+CARD_IDEAL_W = 350     # 列数判定的兜底单位宽（无卡片可测时使用）
 CARD_GAP = 12          # 卡片间距
 MAX_COLS = 3           # 最大列数
 MAX_CONTENT_W = MAX_COLS * CARD_IDEAL_W + (MAX_COLS - 1) * CARD_GAP + 36
@@ -213,7 +213,9 @@ class App(tk.Tk):
         super().__init__()
         self.title(APP_TITLE)
         self.configure(bg=COLOR_BG)
-        self.minsize(440, 380)
+        # 最小宽 470：保证最长币种名（马来西亚林吉特/塞尔维亚第纳尔）的
+        # 卡片在单列下也完整显示（实测自然宽约 410px + 间距，见 _measure_cards）
+        self.minsize(470, 380)
         self.resizable(True, True)
         # 替换默认 Tk 羽毛笔图标
         try:
@@ -237,6 +239,8 @@ class App(tk.Tk):
         self._sb_visible = True     # 滚动条当前是否显示（按需隐藏）
         self._cols = 1              # 卡片当前列数（响应式，随窗口宽度变化）
         self._relayout_job = None   # 列数变化去抖重排的 after 任务句柄
+        self._cards_min_w = 0       # 当前卡片的最大自然宽度（不截字所需，实测）
+        self._outer = None          # 内容区的父容器（用于读取窗口宽）
         self._disp_by_code = {cur.code: cur.display for cur in ALL_CURRENCIES}
         # 选中币种与窗口尺寸（持久化到 %APPDATA%）
         # _load_config 已保证 selected 非空且均为合法币种代码
@@ -274,6 +278,7 @@ class App(tk.Tk):
         outer = tk.Frame(self, bg=COLOR_BG)
         outer.pack(fill="both", expand=True)
         self._content = tk.Frame(outer, bg=COLOR_BG)
+        self._outer = outer
         self._content.place(relx=0.5, rely=0, anchor="n", relheight=1.0,
                             width=min(440, MAX_CONTENT_W))
         outer.bind("<Configure>", self._on_outer_resize)
@@ -508,19 +513,76 @@ class App(tk.Tk):
         # 新增币种时，先用会话内已有数据即时渲染（标注「上次数据」），
         # 避免等待这次网络请求期间显示「--」
         self._render_session()
-        self._layout_cards()
-        self._update_scrollbar()
+        self._sync_layout()
 
     # ---------- 响应式多列布局 ----------
 
-    def _desired_cols(self, canvas_w):
-        """按画布可用宽度计算卡片段数：放得下几张理想宽度的卡就排几列。
+    def _measure_cards(self):
+        """测量当前卡片「不截字所需」的最大自然宽度（_cards_min_w）。
 
-        公式：cols = (可用宽 + 间距) // (理想卡宽 + 间距)，钳制到 1..MAX_COLS。
-        720 宽的默认窗口 → 1 列；约 790+ → 2 列；1140+（上限宽）→ 3 列。
+        取所有卡片请求宽度的最大值：任何一张卡被压窄都会截字，列数
+        阈值必须以最宽的卡片为准，而不是固定的经验值。测量前把来源
+        胶囊临时设为最宽文案「● 备用源参考」——胶囊实际文案随数据
+        而定（空/中行牌价/备用源/上次数据），若按当前文案测量，数据
+        到达后胶囊变宽会重新截字。测完恢复原文案。
         """
-        cols = (canvas_w + CARD_GAP) // (CARD_IDEAL_W + CARD_GAP)
+        if not self.cards:
+            self._cards_min_w = CARD_IDEAL_W
+            return
+        saved = {}
+        try:
+            for code, info in self.cards.items():
+                saved[code] = info["tag"].cget("text")
+                info["tag"].config(text="● 备用源参考")
+            self.update_idletasks()
+            self._cards_min_w = max(info["card"].winfo_reqwidth()
+                                    for info in self.cards.values())
+        finally:
+            for code, text in saved.items():
+                try:
+                    self.cards[code]["tag"].config(text=text)
+                except tk.TclError:
+                    pass
+
+    def _card_unit_w(self):
+        """单列占位宽 = 卡片自然宽 + grid 两侧 padx（5×2）。"""
+        return (self._cards_min_w or CARD_IDEAL_W) + 10
+
+    def _desired_cols(self, canvas_w):
+        """按画布可用宽度与卡片实测自然宽度计算列数，钳制 1..MAX_COLS。
+
+        cols = (可用宽 + 间距) // (单列占位宽 + 间距)。以实测的最宽
+        卡片为单位，保证选出的列数下每张卡（含最长币种名）都放得下。
+        """
+        unit = self._card_unit_w()
+        cols = (canvas_w + CARD_GAP) // (unit + CARD_GAP)
         return max(1, min(MAX_COLS, int(cols)))
+
+    def _content_max_w(self):
+        """内容区宽度上限：下限 MAX_CONTENT_W，且随最宽卡片联动放大，
+        保证满列数（MAX_COLS）时最宽的卡片也放得下。"""
+        need = MAX_COLS * self._card_unit_w() + (MAX_COLS - 1) * CARD_GAP + 36
+        return max(MAX_CONTENT_W, need)
+
+    def _apply_content_width(self):
+        """按当前上限重设内容区宽度（窗口实际宽与上限取小者）。"""
+        try:
+            win_w = self._outer.winfo_width()
+        except (AttributeError, tk.TclError):
+            return
+        if win_w > 1:
+            self._content.place_configure(
+                width=min(win_w, self._content_max_w()))
+
+    def _sync_layout(self):
+        """重建卡片后的整体同步：测量 → 定内容宽 → 定列数 → 重排。"""
+        self._measure_cards()
+        self._apply_content_width()
+        canvas_w = self.card_canvas.winfo_width()
+        if canvas_w > 1:
+            self._cols = self._desired_cols(canvas_w)
+        self._layout_cards()
+        self._update_scrollbar()
 
     def _schedule_relayout(self, canvas_w):
         """窗口宽度变化时按需重排列数（去抖 150ms，避免拖拽中频繁重排跳动）。"""
@@ -594,7 +656,7 @@ class App(tk.Tk):
 
     def _on_outer_resize(self, e):
         """窗口尺寸变化：内容区限最大宽度并水平居中。"""
-        self._content.place_configure(width=min(e.width, MAX_CONTENT_W))
+        self._content.place_configure(width=min(e.width, self._content_max_w()))
         self._update_scrollbar()
 
     def _on_mousewheel(self, e):
@@ -636,7 +698,7 @@ class App(tk.Tk):
     def _build_card(self, parent, cur):
         code, disp = cur.code, cur.display
         card = tk.Frame(parent, bg=COLOR_CARD, highlightbackground=COLOR_BORDER,
-                        highlightthickness=1, padx=18, pady=14)
+                        highlightthickness=1, padx=16, pady=14)
         # 不在此处 pack/grid：位置由 _layout_cards 按响应式列数统一排布
 
         # 卡片头：货币符号 + 名称 + 来源胶囊 + 复制按钮
@@ -646,18 +708,18 @@ class App(tk.Tk):
         # 在 width=2 下会被截断显示不全，改为按内容自适应宽度
         sym = tk.Label(top, text=cur.symbol, bg=COLOR_CARD, fg=COLOR_ACCENT,
                        font=F_CARD_SYMBOL, anchor="w")
-        sym.pack(side="left", padx=(0, 8))
+        sym.pack(side="left", padx=(0, 6))
         title = tk.Label(top, text="%s（%s）" % (disp, code), bg=COLOR_CARD,
                          fg=COLOR_TEXT, font=F_CARD_TITLE)
         title.pack(side="left")
         tag = tk.Label(top, text="", bg=COLOR_CARD, fg=COLOR_SUB,
-                       font=F_TAG, padx=8, pady=2)
-        tag.pack(side="left", padx=(8, 0))
+                       font=F_TAG, padx=6, pady=2)
+        tag.pack(side="left", padx=(6, 0))
         btn_copy = tk.Button(top, text="复制", command=lambda c=code: self._copy(c),
                              font=F_BTN_SMALL, bg=COLOR_CARD, fg=COLOR_BTN_TEXT,
                              activebackground=COLOR_BTN_ACTIVE,
                              activeforeground=COLOR_BTN_TEXT_ACTIVE,
-                             relief="flat", padx=12, pady=3, cursor="hand2",
+                             relief="flat", padx=10, pady=3, cursor="hand2",
                              takefocus=0, bd=0,
                              highlightthickness=1,
                              highlightbackground=COLOR_BORDER,
@@ -672,14 +734,16 @@ class App(tk.Tk):
         # 分隔线：头部与数值区之间
         tk.Frame(card, bg=COLOR_DIVIDER, height=1).pack(fill="x", pady=(11, 10))
 
-        # 主数值：1 外币 = X 人民币（等宽数字，宽度固定避免刷新时跳动）
+        # 主数值：1 外币 = X 人民币（等宽数字，宽度固定避免刷新时跳动）。
+        # 宽度 8：fmt 对 <0.01 的汇率输出 8 字符（如 KRW「0.005200」），
+        # 旧值 7（118px）会截掉末位（实测自然宽 134px，width=8 恰好容纳）。
         mid = tk.Frame(card, bg=COLOR_CARD)
         mid.pack(fill="x")
         lbl_cur = tk.Label(mid, text="1 %s =" % disp, bg=COLOR_CARD, fg=COLOR_TEXT,
                            font=F_UNIT)
         lbl_cur.pack(side="left")
         value = tk.Label(mid, text="--", bg=COLOR_CARD, fg=COLOR_ACCENT,
-                         font=F_VALUE, width=7, anchor="w")
+                         font=F_VALUE, width=8, anchor="w")
         value.pack(side="left", padx=3)
         lbl_cny = tk.Label(mid, text="人民币", bg=COLOR_CARD, fg=COLOR_TEXT,
                            font=F_UNIT)

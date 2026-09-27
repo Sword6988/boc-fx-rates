@@ -17,12 +17,12 @@ VSVersionInfo(
           '080404b0',
           [StringStruct('CompanyName', ''),
            StringStruct('FileDescription', '外汇现汇买入价查询'),
-           StringStruct('FileVersion', '1.4.5.0'),
+           StringStruct('FileVersion', '1.4.6.0'),
            StringStruct('InternalName', '外汇现汇买入价查询'),
            StringStruct('LegalCopyright', ''),
            StringStruct('OriginalFilename', '外汇现汇买入价查询.exe'),
            StringStruct('ProductName', '外汇现汇买入价查询'),
-           StringStruct('ProductVersion', '1.4.5.0')]
+           StringStruct('ProductVersion', '1.4.6.0')]
         )
       ]
     ),

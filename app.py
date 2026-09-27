@@ -38,6 +38,7 @@ from fetcher import (
     fetch_all,
     fmt,
 )
+from tray import WM_APP_TRAY, WM_LBUTTONUP, TrayController
 
 # ----------------------------- 配置 -----------------------------
 
@@ -269,6 +270,15 @@ class App(tk.Tk):
             self.eval("tk::PlaceWindow . center")
             self.after_idle(self._fit_window)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        # 系统托盘：启动时仅子类化窗口过程（接收托盘回调与二次启动唤醒
+        # 消息），托盘图标在首次「最小化到托盘」时才注册
+        self._tray = TrayController(
+            self, _resource_path("app_icon.ico"), APP_TITLE,
+            self._tray_restore, self._quit_app)
+        self._tray.install()
+        self._tray_notified = False   # 「已最小化到托盘」气泡只提示一次
+        self._close_dlg = None        # 关闭方式选择对话框（打开时非 None）
 
     # ---------- 界面构建 ----------
 
@@ -687,13 +697,152 @@ class App(tk.Tk):
         except tk.TclError:
             pass
 
+    # ---------- 关闭 / 托盘 ----------
+
     def _on_close(self):
-        """关闭前保存窗口尺寸与币种选择，供下次启动恢复。"""
+        """点击窗口关闭按钮：弹窗让用户选择「最小化到托盘」或「直接退出」。"""
+        if self._close_dlg is not None and self._close_dlg.winfo_exists():
+            self._close_dlg.lift()
+            self._close_dlg.focus_force()
+            return
+        self._open_close_dialog()
+
+    def _open_close_dialog(self):
+        """关闭方式选择对话框（模态，风格与主界面一致）。
+
+        Esc / 回车 / 关闭对话框均按推荐项「最小化到系统托盘」处理，
+        不会造成误退出。
+        """
+        dlg = tk.Toplevel(self, bg=COLOR_CARD, highlightthickness=1,
+                          highlightbackground=COLOR_BORDER)
+        self._close_dlg = dlg
+        dlg.title("关闭程序")
+        dlg.resizable(False, False)
+        dlg.transient(self)
+
+        body = tk.Frame(dlg, bg=COLOR_CARD, padx=24, pady=20)
+        body.pack(fill="both", expand=True)
+        tk.Label(body, text="关闭程序", bg=COLOR_CARD, fg=COLOR_TEXT,
+                 font=(FONT_FAMILY, 13, "bold")).pack(anchor="w")
+        tk.Label(body,
+                 text="「最小化到系统托盘」后程序在后台保持运行，点击托盘"
+                      "图标可随时打开并自动更新牌价；「直接退出」将关闭程序。",
+                 bg=COLOR_CARD, fg=COLOR_SUB, font=F_TAG,
+                 wraplength=300, justify="left").pack(anchor="w", pady=(8, 18))
+
+        def choose(action):
+            dlg.grab_release()
+            dlg.destroy()
+            self._close_dlg = None
+            action()
+
+        btns = tk.Frame(body, bg=COLOR_CARD)
+        btns.pack(fill="x")
+        btn_tray = tk.Button(
+            btns, text="最小化到系统托盘",
+            command=lambda: choose(self._minimize_to_tray),
+            font=F_BTN_MAIN, bg=COLOR_ACCENT, fg="white",
+            activebackground=COLOR_ACCENT_DARK, activeforeground="white",
+            relief="flat", padx=16, pady=6, cursor="hand2", takefocus=0, bd=0)
+        btn_tray.pack(side="left")
+        btn_exit = tk.Button(
+            btns, text="直接退出",
+            command=lambda: choose(self._quit_app),
+            font=F_BTN_SMALL, bg=COLOR_CARD, fg=COLOR_BTN_TEXT,
+            activebackground=COLOR_BTN_ACTIVE,
+            activeforeground=COLOR_BTN_TEXT_ACTIVE,
+            relief="flat", padx=14, pady=6, cursor="hand2", takefocus=0, bd=0,
+            highlightthickness=1, highlightbackground=COLOR_BORDER,
+            highlightcolor=COLOR_BORDER)
+        btn_exit.pack(side="right")
+        _bind_hover(btn_tray, (COLOR_ACCENT, "white"),
+                    (COLOR_ACCENT_DARK, "white"))
+        _bind_hover(btn_exit, (COLOR_CARD, COLOR_BTN_TEXT),
+                    (COLOR_BTN_ACTIVE, COLOR_BTN_TEXT_ACTIVE))
+
+        dlg.bind("<Escape>", lambda _e: choose(self._minimize_to_tray))
+        dlg.bind("<Return>", lambda _e: choose(self._minimize_to_tray))
+        dlg.protocol("WM_DELETE_WINDOW", lambda: choose(self._minimize_to_tray))
+
+        # 居中于主窗口，并钳制到屏幕内
+        dlg.update_idletasks()
+        try:
+            x = self.winfo_rootx() + (self.winfo_width()
+                                      - dlg.winfo_width()) // 2
+            y = self.winfo_rooty() + (self.winfo_height()
+                                      - dlg.winfo_height()) // 3
+            x = max(4, min(x, self.winfo_screenwidth()
+                           - dlg.winfo_width() - 4))
+            y = max(4, min(y, self.winfo_screenheight()
+                           - dlg.winfo_height() - 4))
+            dlg.geometry("+%d+%d" % (x, y))
+        except tk.TclError:
+            pass
+        dlg.deiconify()
+        dlg.lift()
+        dlg.focus_force()
+        try:
+            dlg.wait_visibility()
+            dlg.grab_set()
+        except tk.TclError:
+            pass
+
+    def _save_geometry_config(self):
+        """关闭/最小化前保存窗口尺寸与币种选择，供下次启动恢复。"""
         try:
             _save_config(self._selected, self.geometry())
         except Exception:
             pass
+
+    def _minimize_to_tray(self):
+        """隐藏主窗口并注册托盘图标（后台保持运行）。"""
+        self._close_currency_panel()
+        self._save_geometry_config()
+        self.withdraw()
+        if not self._tray.show():
+            # 托盘注册失败（极少见）：退回普通最小化，保证窗口不丢
+            self.iconify()
+            return
+        if not self._tray_notified:
+            self._tray.notify(
+                APP_TITLE,
+                "程序已最小化到系统托盘，点击图标可重新打开并自动更新牌价。")
+            self._tray_notified = True
+
+    def _tray_restore(self):
+        """从托盘恢复窗口：重新显示并自动刷新一次最新牌价。
+
+        触发点：左键单击托盘图标、托盘菜单「显示主窗口」、以及二次启动
+        实例的唤醒消息（WM_APP_TRAY，见 _ensure_single_instance）。
+        """
+        try:
+            if not self.winfo_exists():
+                return
+            self._close_dlg_check()
+            self.deiconify()
+            self.lift()
+            self.focus_force()
+            self.refresh()
+        except tk.TclError:
+            pass
+
+    def _close_dlg_check(self):
+        """恢复窗口前关闭可能残留的关闭方式选择对话框。"""
+        dlg = self._close_dlg
+        if dlg is not None and dlg.winfo_exists():
+            dlg.destroy()
+        self._close_dlg = None
+
+    def _quit_app(self):
+        """退出程序（对话框「直接退出」/ 托盘菜单「退出程序」）。"""
+        self._save_geometry_config()
         self.destroy()
+
+    def destroy(self):
+        """退出前清理托盘资源：删除图标、还原窗口过程，避免残留。"""
+        if getattr(self, "_tray", None) is not None:
+            self._tray.shutdown()
+        super().destroy()
 
     def _build_card(self, parent, cur):
         code, disp = cur.code, cur.display
@@ -995,6 +1144,10 @@ def _ensure_single_instance():
     if hwnd:   # c_void_p：失败返回 None
         user32.ShowWindow(hwnd, 9)        # SW_RESTORE
         user32.SetForegroundWindow(hwnd)
+        # 主窗口可能正最小化到托盘（隐藏且 Tk 状态为 withdraw）：投递托盘
+        # 激活消息让程序自行恢复窗口并刷新数据（见 App._tray_restore），
+        # 避免 ShowWindow 绕过 Tk 造成状态不同步
+        user32.PostMessageW(hwnd, WM_APP_TRAY, 0, WM_LBUTTONUP)
     else:
         # 理论上不应发生（mutex 存在则窗口应已创建），兜底提示而非静默退出
         ctypes.windll.user32.MessageBoxW(

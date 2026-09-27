@@ -109,6 +109,12 @@ MAX_COLS = 4           # 最大列数（超宽窗口下 4 列铺满，减少两�
 CARD_SLACK = 60        # 满列时每列允许吸收的额外宽度（列数判定余量）
 MAX_CONTENT_W = MAX_COLS * CARD_IDEAL_W + (MAX_COLS - 1) * CARD_GAP + 36
 
+# 复制反馈节奏：瞬时上色 → 满色停留 → 三步渐隐（总时长 ≈ 1.06s，
+# 停留比旧版 1200ms 短、退场有过渡，反馈更跟手且不生硬）
+FLASH_HOLD_MS = 850    # 满色停留时长
+FLASH_FADE_STEPS = 3   # 渐隐步数
+FLASH_FADE_MS = 70     # 渐隐单步间隔（退场 ≈ 210ms）
+
 
 def _set_clipboard_win(text):
     """用 Windows 原生 API 写入剪贴板（UTF-16LE），数据立即生效。
@@ -218,16 +224,91 @@ def _round_window_corners(win):
         pass
 
 
-def _bind_hover(widget, normal, active, guard=None):
-    """统一 hover 变色绑定，消除三处按钮的重复样板。
+def _mix_color(c1, c2, t):
+    """两个 #rrggbb 颜色按 t 线性插值（t=0 → c1，t=1 → c2）。"""
+    a = (int(c1[1:3], 16), int(c1[3:5], 16), int(c1[5:7], 16))
+    b = (int(c2[1:3], 16), int(c2[3:5], 16), int(c2[5:7], 16))
+    return "#%02x%02x%02x" % tuple(
+        max(0, min(255, round(x + (y - x) * t))) for x, y in zip(a, b))
 
-    normal/active 为 (bg, fg) 元组；guard(widget) 返回 False 时该次
-    Enter/Leave 不变色（用于禁用态、「已复制 ✓」反馈期等守卫）。
+
+HOVER_MS = 45      # hover 过渡单步间隔（ms）
+HOVER_STEPS = 2    # hover 过渡步数（总时长 = steps × ms ≈ 90ms）
+
+
+def _bind_hover(widget, normal, active, guard=None):
+    """统一 hover 变色绑定，带两步颜色微过渡（约 90ms）。
+
+    normal/active 为 (bg, fg) 元组（fg 传 None 则只过渡背景，供 Canvas
+    等无前景色控件使用）；guard(widget) 返回 False 时该次 Enter/Leave
+    不变色（用于禁用态、「已复制 ✓」反馈期等守卫）。
+    过渡从控件当前颜色出发：快速来回扫过时从中途色继续，不会跳变；
+    回调链挂在控件自身 after 上，控件销毁后自动失效。
     """
+    st = {"job": None}
+
+    def cancel():
+        if st["job"] is not None:
+            try:
+                widget.after_cancel(st["job"])
+            except Exception:
+                pass
+            st["job"] = None
+
+    def chain(frm, to, i):
+        t = (i + 1) / HOVER_STEPS
+        try:
+            widget.config(bg=_mix_color(frm[0], to[0], t))
+            if to[1] is not None:
+                widget.config(fg=_mix_color(frm[1], to[1], t))
+        except tk.TclError:
+            st["job"] = None
+            return
+        if i + 1 < HOVER_STEPS:
+            st["job"] = widget.after(HOVER_MS, lambda: chain(frm, to, i + 1))
+        else:
+            st["job"] = None
+
+    def go(target):
+        cancel()
+        try:
+            frm = (widget.cget("bg"), widget.cget("fg"))
+        except tk.TclError:
+            return
+        chain(frm, target, 0)
+
     widget.bind("<Enter>", lambda e: None if guard and not guard(e.widget)
-                else e.widget.config(bg=active[0], fg=active[1]))
+                else go(active))
     widget.bind("<Leave>", lambda e: None if guard and not guard(e.widget)
-                else e.widget.config(bg=normal[0], fg=normal[1]))
+                else go(normal))
+
+
+FADE_IN_STEPS = 4    # 窗口淡入步数
+FADE_IN_MS = 28      # 淡入单步间隔（总时长 ≈ 112ms）
+FADE_IN_FROM = 0.4   # 起始不透明度（1.0 = 全不透明）
+
+
+def _fade_in(win, steps=FADE_IN_STEPS, ms=FADE_IN_MS, start=FADE_IN_FROM):
+    """Toplevel 窗口快速淡入：alpha 从 start 分步过渡到 1.0。
+
+    只做短促的轻淡入（约 110ms），保证「跟手」不拖沓；不支持的
+    平台静默跳过（等效瞬时显示）。
+    """
+    try:
+        win.attributes("-alpha", start)
+    except tk.TclError:
+        return
+
+    def up(i):
+        try:
+            win.attributes("-alpha",
+                           min(1.0, start + (1.0 - start) * (i + 1) / steps))
+        except tk.TclError:
+            return
+        if i + 1 < steps:
+            win.after(ms, lambda: up(i + 1))
+
+    up(0)
 
 
 class App(tk.Tk):
@@ -449,10 +530,8 @@ class App(tk.Tk):
             for w in widgets:
                 w.config(cursor="hand2")
                 w.bind("<Button-1>", lambda _e, c=code: self._panel_toggle(c))
-                w.bind("<Enter>", lambda _e, ws=widgets: [
-                    x.config(bg=COLOR_BTN_ACTIVE) for x in ws])
-                w.bind("<Leave>", lambda _e, ws=widgets: [
-                    x.config(bg=COLOR_CARD) for x in ws])
+                # 行 hover 与全局按钮同一套微过渡（Canvas 无 fg，仅背景色）
+                _bind_hover(w, (COLOR_CARD, None), (COLOR_BTN_ACTIVE, None))
             self._panel_checks[code] = chk
         body.grid_columnconfigure(0, weight=1)
         body.grid_columnconfigure(1, weight=1)
@@ -466,6 +545,7 @@ class App(tk.Tk):
         x = max(4, min(x, self.winfo_screenwidth() - panel.winfo_width() - 4))
         y = max(4, min(y, self.winfo_screenheight() - panel.winfo_height() - 4))
         panel.geometry("+%d+%d" % (x, y))
+        _fade_in(panel)   # 快速淡入（映射前设置 alpha，不闪全不透明帧）
         self._sync_currency_panel()
         # 全局抓取：点面板外任意位置即关闭（点击落在面板自身上且
         # 坐标在面板范围外 → 判定为外部点击）；Esc 亦可关闭
@@ -623,13 +703,13 @@ class App(tk.Tk):
         self._update_scrollbar()
 
     def _schedule_relayout(self, canvas_w):
-        """窗口宽度变化时按需重排列数（去抖 150ms，避免拖拽中频繁重排跳动）。"""
+        """窗口宽度变化时按需重排列数（去抖 120ms，避免拖拽中频繁重排跳动）。"""
         cols = self._desired_cols(canvas_w)
         if cols == self._cols:
             return
         if self._relayout_job is not None:
             self.after_cancel(self._relayout_job)
-        self._relayout_job = self.after(150, lambda: self._apply_cols(cols))
+        self._relayout_job = self.after(120, lambda: self._apply_cols(cols))
 
     def _apply_cols(self, cols):
         self._relayout_job = None
@@ -825,6 +905,7 @@ class App(tk.Tk):
             dlg.geometry("+%d+%d" % (x, y))
         except tk.TclError:
             pass
+        _fade_in(dlg)   # 快速淡入（约 110ms，映射前设置 alpha）
         dlg.deiconify()
         dlg.lift()
         dlg.focus_force()
@@ -1130,11 +1211,12 @@ class App(tk.Tk):
     def _flash_copy(self, code):
         c = self.cards[code]
         btn = c["btn_copy"]
-        # 复制成功：按钮短暂变为淡绿底 + 绿字，反馈更明显；
-        # 反馈期间挂起 hover 变色，避免绿色被 hover 规则覆盖
+        # 复制成功：按钮立即变为淡绿底 + 绿字（瞬时上色保证反馈跟手），
+        # 短暂停留后分三步渐隐回常态（约 210ms），消除「瞬间跳回」的
+        # 生硬感；反馈期间挂起 hover 变色，避免被 hover 规则覆盖
         btn.flashing = True
         btn.config(text="已复制 ✓", bg=COLOR_OK_SOFT, fg=COLOR_OK)
-        # 连续快速复制时取消上一次的还原回调，避免按钮文字被提前还原
+        # 连续快速复制时取消上一次的还原链，避免按钮文字被提前还原
         prev = c.get("flash_after")
         if prev:
             try:
@@ -1142,15 +1224,31 @@ class App(tk.Tk):
             except Exception:
                 pass
 
-        def restore():
-            btn.flashing = False
-            try:
-                if self.winfo_exists():
-                    btn.config(text="复制", bg=COLOR_CARD, fg=COLOR_BTN_TEXT)
-            except tk.TclError:
-                pass
+        frm = (COLOR_OK_SOFT, COLOR_OK)
+        to = (COLOR_CARD, COLOR_BTN_TEXT)
 
-        c["flash_after"] = self.after(1200, restore)
+        def fade(i):
+            t = (i + 1) / FLASH_FADE_STEPS
+            try:
+                if self.winfo_exists() and btn.winfo_exists():
+                    btn.config(bg=_mix_color(frm[0], to[0], t),
+                               fg=_mix_color(frm[1], to[1], t))
+            except tk.TclError:
+                btn.flashing = False
+                c["flash_after"] = None
+                return
+            if i + 1 < FLASH_FADE_STEPS:
+                c["flash_after"] = self.after(FLASH_FADE_MS,
+                                              lambda: fade(i + 1))
+            else:
+                btn.config(text="复制")   # 渐隐结束时一并还原按钮文字
+                btn.flashing = False
+                c["flash_after"] = None
+
+        def restore():
+            c["flash_after"] = self.after(FLASH_FADE_MS, lambda: fade(0))
+
+        c["flash_after"] = self.after(FLASH_HOLD_MS, restore)
 
 
 def _setup_logging():

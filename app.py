@@ -44,26 +44,32 @@ from fetcher import (
 FONT_FAMILY = "Microsoft YaHei UI"
 FONT_MONO = "Consolas"
 
-# ------------------------- 调色板（浅色主题） -------------------------
+# ------------------------- 调色板（浅色 · 现代扁平） -------------------------
+# 设计语言：冷灰中性底 + 纯白卡片 + 柔和描边 + 中行红点缀；
+# 来源标签用「浅底彩色胶囊（chip）」承载，按钮分主（填充红）/次（幽灵描边）两级。
 
-COLOR_BG = "#f4f5f7"           # 窗口背景
+COLOR_BG = "#f6f7f9"           # 窗口背景（冷灰）
 COLOR_CARD = "#ffffff"         # 卡片背景
-COLOR_BORDER = "#e4e7ec"       # 卡片描边
-COLOR_DIVIDER = "#f0f2f4"      # 卡片内分隔线
-COLOR_TEXT = "#1f2329"         # 主文字
-COLOR_SUB = "#8a919f"          # 次级文字
+COLOR_BORDER = "#e6e8ee"       # 卡片描边
+COLOR_DIVIDER = "#f1f3f6"      # 卡片内分隔线
+COLOR_TEXT = "#1a1d24"         # 主文字
+COLOR_SUB = "#878e9c"          # 次级文字
 COLOR_ACCENT = "#b81b22"       # 中行红（主强调：数值/符号/主按钮）
-COLOR_ACCENT_DARK = "#9a151b"  # 中行红（hover/按下加深）
-COLOR_TAG_FALLBACK = "#8a6d3b" # 备用源标签
-COLOR_BTN = "#f2f3f5"          # 次级按钮底色
-COLOR_BTN_ACTIVE = "#e6e9ed"   # 次级按钮 hover
-COLOR_BTN_TEXT = "#4a5160"     # 次级按钮文字（比 SUB 深，避免误读为禁用）
-COLOR_BTN_TEXT_ACTIVE = "#1f2329"
+COLOR_ACCENT_DARK = "#991419"  # 中行红（hover/按下加深）
+COLOR_TAG_BOC_BG = "#fbeeec"   # 「中行牌价」胶囊底（红的浅色调）
+COLOR_TAG_FALLBACK = "#9a6b1f" # 「备用源」胶囊文字
+COLOR_TAG_FALLBACK_BG = "#f9f2e2"  # 「备用源」胶囊底（琥珀浅调）
+COLOR_TAG_STALE_FG = "#6f7684" # 「上次数据」胶囊文字
+COLOR_TAG_STALE_BG = "#f1f3f6" # 「上次数据」胶囊底（中性灰）
+COLOR_BTN = "#ffffff"          # 次级（幽灵）按钮底色
+COLOR_BTN_ACTIVE = "#f0f2f6"   # 次级按钮 hover
+COLOR_BTN_TEXT = "#565d6b"     # 次级按钮文字
+COLOR_BTN_TEXT_ACTIVE = "#1a1d24"
 COLOR_WARN = "#b45309"         # 警告（琥珀色，不刺眼）
 COLOR_ERR = "#bb3a3a"          # 错误（柔和红，非纯红）
 COLOR_BUSY = "#3a6ea5"         # 进行中（中性蓝，与错误红区分，避免误读为出错）
 COLOR_OK = "#1e7f3c"           # 成功反馈（复制成功）
-COLOR_OK_SOFT = "#e9f6ee"      # 成功反馈按钮底色（淡绿）
+COLOR_OK_SOFT = "#e8f7ee"      # 成功反馈按钮底色（淡绿）
 COLOR_REFRESH_DISABLED_BG = "#e4e6ea"   # 刷新按钮禁用底色
 COLOR_REFRESH_DISABLED_FG = "#a7adb8"   # 刷新按钮禁用文字
 
@@ -78,16 +84,16 @@ _STATUS_DOT = {
 
 # --------------------- 字体层级（统一引用） ---------------------
 
-F_TITLE = (FONT_FAMILY, 16, "bold")    # 窗口主标题
+F_TITLE = (FONT_FAMILY, 17, "bold")    # 窗口主标题
 F_SUBTITLE = (FONT_FAMILY, 9)          # 主标题下副说明
 F_CARD_TITLE = (FONT_FAMILY, 12, "bold")  # 卡片币种名
 F_CARD_SYMBOL = (FONT_FAMILY, 13, "bold") # 卡片货币符号
-F_TAG = (FONT_FAMILY, 9)               # 卡片来源标签
-F_VALUE = (FONT_MONO, 20, "bold")      # 主数值（等宽，防刷新跳动）
+F_TAG = (FONT_FAMILY, 9)               # 卡片来源胶囊
+F_VALUE = (FONT_MONO, 22, "bold")      # 主数值（等宽，防刷新跳动）
 F_UNIT = (FONT_FAMILY, 11)             # 「1 外币 =」「人民币」单位
 F_SRC = (FONT_FAMILY, 9)               # 来源行
 F_STATUS = (FONT_FAMILY, 9)            # 状态行
-F_BTN_MAIN = (FONT_FAMILY, 9, "bold")  # 主按钮（刷新）
+F_BTN_MAIN = (FONT_FAMILY, 10, "bold") # 主按钮（刷新）
 F_BTN_SMALL = (FONT_FAMILY, 9)         # 次级按钮（复制/币种菜单）
 
 MAX_CONTENT_W = 760   # 内容区最大宽度（超出后整体居中，避免卡片被拉得过宽）
@@ -177,6 +183,13 @@ def _log_crash(context, exc):
         pass
 
 
+def _rounded_rect(cv, x1, y1, x2, y2, r, **kw):
+    """在 Canvas 上画圆角矩形（polygon smooth 拟合），供纯装饰元素使用。"""
+    pts = [x1+r, y1, x2-r, y1, x2, y1, x2, y1+r, x2, y2-r, x2, y2,
+           x2-r, y2, x1+r, y2, x1, y2, x1, y2-r, x1, y1+r, x1, y1]
+    return cv.create_polygon(pts, smooth=True, **kw)
+
+
 def _bind_hover(widget, normal, active, guard=None):
     """统一 hover 变色绑定，消除三处按钮的重复样板。
 
@@ -251,17 +264,25 @@ class App(tk.Tk):
                             width=min(440, MAX_CONTENT_W))
         outer.bind("<Configure>", self._on_outer_resize)
 
-        pad = tk.Frame(self._content, bg=COLOR_BG, padx=18, pady=14)
+        pad = tk.Frame(self._content, bg=COLOR_BG, padx=18, pady=16)
         pad.pack(fill="both", expand=True)
 
-        # 顶部标题区：应用名 + 副标题（左），币种菜单（右）
+        # 顶部标题区：品牌徽标 + 应用名（左），币种菜单（右）
         header = tk.Frame(pad, bg=COLOR_BG)
-        header.pack(fill="x", pady=(0, 12))
+        header.pack(fill="x", pady=(0, 14))
         title_box = tk.Frame(header, bg=COLOR_BG)
         title_box.pack(side="left", anchor="n")
-        tk.Label(title_box, text="外汇现汇买入价", bg=COLOR_BG, fg=COLOR_TEXT,
+        mark = tk.Canvas(title_box, width=36, height=36, bg=COLOR_BG,
+                         highlightthickness=0)
+        mark.pack(side="left", padx=(0, 10), pady=(2, 0))
+        _rounded_rect(mark, 1, 1, 35, 35, 10, fill=COLOR_ACCENT, outline="")
+        mark.create_text(18, 19, text="¥", fill="white",
+                         font=(FONT_FAMILY, 15, "bold"))
+        name_box = tk.Frame(title_box, bg=COLOR_BG)
+        name_box.pack(side="left")
+        tk.Label(name_box, text="外汇现汇买入价", bg=COLOR_BG, fg=COLOR_TEXT,
                  font=F_TITLE).pack(anchor="w")
-        tk.Label(title_box, text="中国银行外汇牌价 · 现汇买入价 / 市场参考汇率",
+        tk.Label(name_box, text="中国银行外汇牌价 · 现汇买入价 / 市场参考汇率",
                  bg=COLOR_BG, fg=COLOR_SUB,
                  font=F_SUBTITLE).pack(anchor="w", pady=(3, 0))
         self._build_currency_menu(header)
@@ -289,7 +310,7 @@ class App(tk.Tk):
 
         # 状态栏：状态圆点 + 状态文字 + 刷新按钮
         status_row = tk.Frame(pad, bg=COLOR_BG)
-        status_row.pack(fill="x", pady=(12, 0))
+        status_row.pack(fill="x", pady=(14, 0))
         self.dot_status = tk.Canvas(status_row, width=10, height=10, bg=COLOR_BG,
                                     highlightthickness=0)
         self.dot_status.create_oval(2, 2, 8, 8, fill=COLOR_SUB, outline="",
@@ -305,7 +326,7 @@ class App(tk.Tk):
             font=F_BTN_MAIN, bg=COLOR_ACCENT, fg="white",
             activebackground=COLOR_ACCENT_DARK, activeforeground="white",
             disabledforeground=COLOR_REFRESH_DISABLED_FG,
-            relief="flat", padx=16, pady=4, cursor="hand2", takefocus=0,
+            relief="flat", padx=20, pady=6, cursor="hand2", takefocus=0,
             bd=0)
         self.btn_refresh.pack(side="right", padx=(8, 0))
         # 禁用态不变色，避免「刷新中…」被 hover 提亮造成可点错觉
@@ -321,7 +342,7 @@ class App(tk.Tk):
             parent, text="币种 ▾", font=F_BTN_SMALL,
             bg=COLOR_BTN, fg=COLOR_BTN_TEXT,
             activebackground=COLOR_BTN_ACTIVE, activeforeground=COLOR_BTN_TEXT,
-            relief="flat", padx=12, pady=4, cursor="hand2", takefocus=0)
+            relief="flat", padx=14, pady=5, cursor="hand2", takefocus=0)
         self.menu_btn.pack(side="right", anchor="n")
         _bind_hover(self.menu_btn,
                     (COLOR_BTN, COLOR_BTN_TEXT),
@@ -442,10 +463,10 @@ class App(tk.Tk):
     def _build_card(self, parent, cur):
         code, disp = cur.code, cur.display
         card = tk.Frame(parent, bg=COLOR_CARD, highlightbackground=COLOR_BORDER,
-                        highlightthickness=1, padx=16, pady=12)
-        card.pack(fill="x", pady=5)
+                        highlightthickness=1, padx=18, pady=14)
+        card.pack(fill="x", pady=6)
 
-        # 卡片头：货币符号 + 名称 + 标签 + 复制按钮
+        # 卡片头：货币符号 + 名称 + 来源胶囊 + 复制按钮
         top = tk.Frame(card, bg=COLOR_CARD)
         top.pack(fill="x")
         # 符号标签不设固定宽度：₽、CHF、Mex$ 等宽符号/多字符符号
@@ -457,13 +478,13 @@ class App(tk.Tk):
                          fg=COLOR_TEXT, font=F_CARD_TITLE)
         title.pack(side="left")
         tag = tk.Label(top, text="", bg=COLOR_CARD, fg=COLOR_SUB,
-                       font=F_TAG)
-        tag.pack(side="left", padx=8)
+                       font=F_TAG, padx=8, pady=2)
+        tag.pack(side="left", padx=(8, 0))
         btn_copy = tk.Button(top, text="复制", command=lambda c=code: self._copy(c),
-                             font=F_BTN_SMALL, bg=COLOR_BTN, fg=COLOR_BTN_TEXT,
+                             font=F_BTN_SMALL, bg=COLOR_CARD, fg=COLOR_BTN_TEXT,
                              activebackground=COLOR_BTN_ACTIVE,
                              activeforeground=COLOR_BTN_TEXT_ACTIVE,
-                             relief="flat", padx=10, pady=2, cursor="hand2",
+                             relief="flat", padx=12, pady=3, cursor="hand2",
                              takefocus=0, bd=0,
                              highlightthickness=1,
                              highlightbackground=COLOR_BORDER,
@@ -471,12 +492,12 @@ class App(tk.Tk):
         btn_copy.pack(side="right")
         btn_copy.flashing = False   # 「已复制 ✓」反馈期间 hover 不变色
         _bind_hover(btn_copy,
-                    (COLOR_BTN, COLOR_BTN_TEXT),
+                    (COLOR_CARD, COLOR_BTN_TEXT),
                     (COLOR_BTN_ACTIVE, COLOR_BTN_TEXT_ACTIVE),
                     guard=lambda w: not getattr(w, "flashing", False))
 
         # 分隔线：头部与数值区之间
-        tk.Frame(card, bg=COLOR_DIVIDER, height=1).pack(fill="x", pady=(10, 9))
+        tk.Frame(card, bg=COLOR_DIVIDER, height=1).pack(fill="x", pady=(11, 10))
 
         # 主数值：1 外币 = X 人民币（等宽数字，宽度固定避免刷新时跳动）
         mid = tk.Frame(card, bg=COLOR_CARD)
@@ -494,7 +515,7 @@ class App(tk.Tk):
         # 来源信息
         src = tk.Label(card, text="来源：--", bg=COLOR_CARD, fg=COLOR_SUB,
                        font=F_SRC, anchor="w")
-        src.pack(anchor="w", pady=(7, 0))
+        src.pack(anchor="w", pady=(8, 0))
 
         # 双击任意位置复制；整卡可点区域统一 hand2 指针示意可交互。
         # btn_copy 不参与双击绑定：其 command 在单击释放时已触发，
@@ -563,17 +584,20 @@ class App(tk.Tk):
                 c["value"].config(text=fmt(d["rate1"]))
                 c["src"].config(text="来源：%s" % d["source"])
                 if d.get("fallback"):
-                    c["tag"].config(text="● 备用源参考", fg=COLOR_TAG_FALLBACK)
+                    c["tag"].config(text="● 备用源参考", fg=COLOR_TAG_FALLBACK,
+                                    bg=COLOR_TAG_FALLBACK_BG)
                 else:
-                    c["tag"].config(text="● 中行牌价", fg=COLOR_ACCENT)
+                    c["tag"].config(text="● 中行牌价", fg=COLOR_ACCENT,
+                                    bg=COLOR_TAG_BOC_BG)
             else:
                 if c["rate1"] is None:
                     c["value"].config(text="--")
                     c["src"].config(text="可点击「刷新」重试")
-                    c["tag"].config(text="")
+                    c["tag"].config(text="", bg=COLOR_CARD)
                 else:
                     kept_old = True
-                    c["tag"].config(text="◷ 上次数据", fg=COLOR_SUB)
+                    c["tag"].config(text="◷ 上次数据", fg=COLOR_TAG_STALE_FG,
+                                    bg=COLOR_TAG_STALE_BG)
 
         if msg.get("error"):
             self._status_base = msg["error"]
@@ -660,7 +684,7 @@ class App(tk.Tk):
             btn.flashing = False
             try:
                 if self.winfo_exists():
-                    btn.config(text="复制", bg=COLOR_BTN, fg=COLOR_BTN_TEXT)
+                    btn.config(text="复制", bg=COLOR_CARD, fg=COLOR_BTN_TEXT)
             except tk.TclError:
                 pass
 

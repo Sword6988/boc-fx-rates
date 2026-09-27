@@ -22,7 +22,7 @@ import tkinter as tk
 import traceback
 from datetime import datetime
 
-import fetcher
+import currencies
 from config import (
     APP_TITLE,
     _clamp_geometry,
@@ -31,9 +31,8 @@ from config import (
     _load_config,
     _save_config,
 )
+from currencies import ALL_CURRENCIES, CODE_TO_CURRENCY
 from fetcher import (
-    ALL_CURRENCIES,
-    CODE_TO_CURRENCY,
     _brief,
     _fmt_time,
     fetch_all,
@@ -160,9 +159,15 @@ def _log_crash(context, exc):
     也没有 handler，worker 线程 / Tk 回调里的未预期异常会完全不可见，
     用户报「打开没反应」时无从诊断。此函数保证异常留痕：写入
     %APPDATA%\\<应用名>\\crash.log（目录不可写等失败时静默跳过）。
+    超 1MB 时轮转保留一代（crash.log → crash.log.1），避免无限增长。
     """
     try:
         path = os.path.join(_config_dir(), "crash.log")
+        try:
+            if os.path.getsize(path) > 1 << 20:
+                os.replace(path, path + ".1")
+        except OSError:
+            pass
         with open(path, "a", encoding="utf-8") as f:
             f.write("%s [%s]\n%s\n" % (
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"), context,
@@ -200,6 +205,7 @@ class App(tk.Tk):
         self.result_q = queue.Queue()
         self.cards = {}
         self._fetching = False
+        self._requested = []        # 本次抓取对应的选择快照（检测抓取期间的选择变更）
         self._status_base = "正在准备…"
         self._status_fg_state = "sub"
         self._last_update = ""
@@ -507,6 +513,9 @@ class App(tk.Tk):
         if self._fetching:
             return
         self._fetching = True
+        # 记录本次抓取对应的选择快照：抓取期间用户切换币种时，
+        # _apply_result 据此检测差异并自动补刷（见其末尾）
+        self._requested = list(self._selected)
         self.btn_refresh.config(state="disabled", text="刷新中…",
                                 bg=COLOR_REFRESH_DISABLED_BG)
         self._status_base = "正在获取最新牌价，请稍候…"
@@ -586,6 +595,12 @@ class App(tk.Tk):
             upd or datetime.now().strftime("%Y/%m/%d %H:%M:%S"))
 
         self._render_status()
+
+        # 抓取期间用户切换了币种：在途请求用的是旧快照，新增币种没有数据
+        # （卡片停留在「--」）。本次结果落地后自动补一次刷新；
+        # refresh() 内部会更新快照，选择不再变化时不会循环。
+        if list(self._selected) != self._requested:
+            self.refresh()
 
     # ---------- 其他交互 ----------
 

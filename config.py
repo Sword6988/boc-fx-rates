@@ -11,7 +11,7 @@ import os
 import re
 import tempfile
 
-from fetcher import CURRENCIES, CODE_TO_CURRENCY
+from currencies import CURRENCIES, CODE_TO_CURRENCY
 
 APP_TITLE = "外汇现汇买入价查询"
 

@@ -342,6 +342,7 @@ class App(tk.Tk):
         self._sb_visible = True     # 滚动条当前是否显示（按需隐藏）
         self._cols = 1              # 卡片当前列数（响应式，随窗口宽度变化）
         self._relayout_job = None   # 列数变化去抖重排的 after 任务句柄
+        self._morph_job = None      # 列数过渡动画的 after 任务句柄
         self._cards_min_w = 0       # 当前卡片的最大自然宽度（不截字所需，实测）
         self._outer = None          # 内容区的父容器（用于读取窗口宽）
         self._disp_by_code = {cur.code: cur.display for cur in ALL_CURRENCIES}
@@ -720,8 +721,91 @@ class App(tk.Tk):
         if cols == self._cols or not self.winfo_exists():
             return
         self._cols = cols
-        self._layout_cards()
+        self._morph_relayout()
         self._update_scrollbar()
+
+    # ---------- 列数过渡动画（FLIP 式） ----------
+    # 原理：先记录每张卡的当前几何（起点），按新列数 grid 重排并实测
+    # 目标几何（终点），再临时改用 place 从起点向终点做缓动插值，结束
+    # 时还原 grid。起点即真实位置 → 无跳变；插值平滑 → 无闪烁；期间
+    # 冻结 cards_frame 高度 → 滚动条不跳动；快速连续变列时从「当前
+    # 插值位置」继续动画，不重置、不重叠卡死。
+
+    RELAYOUT_MS = 220      # 过渡总时长（ms）
+    RELAYOUT_STEPS = 11    # 步数（约 20ms/步，接近帧率上限）
+
+    def _morph_relayout(self):
+        if not self.cards:
+            return
+        # 动画进行中再次变列：先取消旧链，从当前插值位置继续（winfo
+        # 读到的就是 place 插值出的实时几何）
+        if getattr(self, "_morph_job", None) is not None:
+            try:
+                self.after_cancel(self._morph_job)
+            except Exception:
+                pass
+            self._morph_job = None
+
+        cards = [self.cards[c.code]["card"] for c in self._selected_curs]
+        try:
+            start = {w: (w.winfo_x(), w.winfo_y(),
+                         w.winfo_width(), w.winfo_height()) for w in cards}
+        except tk.TclError:
+            return
+
+        self._layout_cards()          # 新列数 grid（place 会被 grid 接管）
+        self.update_idletasks()       # 让 grid 立即算出目标几何
+        anim = []
+        for w in cards:
+            try:
+                t = (w.winfo_x(), w.winfo_y(),
+                     w.winfo_width(), w.winfo_height())
+            except tk.TclError:
+                continue
+            if t != start[w]:
+                anim.append((w, start[w], t))
+        if not anim:
+            return
+
+        # 先把所有卡片 place 到起点几何（place 接管会自动解除 grid），
+        # 保证动画首帧就在原位——不先落位会让卡片在目标位置闪现一帧
+        # 再跳回起点附近，产生肉眼可见的往复跳动
+        for w, s, tg in anim:
+            try:
+                w.place(x=s[0], y=s[1], width=s[2], height=s[3])
+            except tk.TclError:
+                return
+
+        # 动画期间冻结框架高度：place 管理的子控件不贡献请求高度，
+        # 不冻结会让 cards_frame 瞬间塌缩、滚动条跳动
+        frozen_h = self.cards_frame.winfo_height()
+        self.cards_frame.configure(height=frozen_h)
+
+        step_ms = max(15, self.RELAYOUT_MS // self.RELAYOUT_STEPS)
+
+        def step(i):
+            t = (i + 1) / self.RELAYOUT_STEPS
+            e = 1.0 - (1.0 - t) ** 3   # cubic ease-out：起步快、收尾缓
+            for w, s, tg in anim:
+                try:
+                    w.place(x=round(s[0] + (tg[0] - s[0]) * e),
+                            y=round(s[1] + (tg[1] - s[1]) * e),
+                            width=round(s[2] + (tg[2] - s[2]) * e),
+                            height=round(s[3] + (tg[3] - s[3]) * e))
+                except tk.TclError:
+                    self._morph_job = None
+                    return
+            if i + 1 < self.RELAYOUT_STEPS:
+                self._morph_job = self.after(step_ms, lambda: step(i + 1))
+            else:
+                # 还原 grid：grid 接管会自动解除 place 管理；
+                # 高度归 0 = 交还给 grid 按内容计算
+                self._morph_job = None
+                self.cards_frame.configure(height=0)
+                self._layout_cards()
+                self._update_scrollbar()
+
+        self._morph_job = self.after(step_ms, lambda: step(0))
 
     def _layout_cards(self):
         """将当前卡片按 _cols 列用 grid 重排（行优先），列宽均分、同行等高。"""

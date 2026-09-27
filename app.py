@@ -197,6 +197,23 @@ def _rounded_rect(cv, x1, y1, x2, y2, r, **kw):
     return cv.create_polygon(pts, smooth=True, **kw)
 
 
+def _round_window_corners(win):
+    """让 Toplevel 窗口启用 Win11 系统圆角 + DWM 投影（旧系统静默跳过）。
+
+    DWMWA_WINDOW_CORNER_PREFERENCE(33) = DWMWCP_ROUND(2)；仅 Win11
+    (build 22000+) 支持，Win10/调用失败时保持直角，不影响功能。
+    """
+    try:
+        if sys.getwindowsversion().build < 22000:
+            return
+        hwnd = ctypes.windll.user32.GetParent(win.winfo_id())
+        pref = ctypes.c_int(2)   # DWMWCP_ROUND
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            hwnd, 33, ctypes.byref(pref), ctypes.sizeof(pref))
+    except Exception:
+        pass
+
+
 def _bind_hover(widget, normal, active, guard=None):
     """统一 hover 变色绑定，消除三处按钮的重复样板。
 
@@ -708,10 +725,13 @@ class App(tk.Tk):
         self._open_close_dialog()
 
     def _open_close_dialog(self):
-        """关闭方式选择对话框（模态，风格与主界面一致）。
+        """关闭方式选择对话框（模态，与主界面同一套设计语言）。
 
-        Esc / 回车 / 关闭对话框均按推荐项「最小化到系统托盘」处理，
-        不会造成误退出。
+        视觉规范对齐主界面：品牌红 ¥ 徽标 + 17px 粗标题（同头部层级）、
+        次级灰说明文字、卡片内同款分隔线、主（红底）/次（幽灵描边）两级
+        按钮；窗口启用 Win11 DWM 圆角 + 系统投影，无投影的旧系统回退
+        1px 描边卡片观感。Esc / 回车 / 关闭对话框均按推荐项「最小化到
+        系统托盘」处理，不会造成误退出。
         """
         dlg = tk.Toplevel(self, bg=COLOR_CARD, highlightthickness=1,
                           highlightbackground=COLOR_BORDER)
@@ -719,16 +739,40 @@ class App(tk.Tk):
         dlg.title("关闭程序")
         dlg.resizable(False, False)
         dlg.transient(self)
+        try:
+            # Win11：系统圆角 + 投影已提供边界感，去掉 1px 直角描边
+            # （描边是方角，会被圆角裁出毛边）；旧系统保留描边卡片观感
+            if sys.getwindowsversion().build >= 22000:
+                dlg.configure(highlightthickness=0)
+        except Exception:
+            pass
 
-        body = tk.Frame(dlg, bg=COLOR_CARD, padx=24, pady=20)
-        body.pack(fill="both", expand=True)
-        tk.Label(body, text="关闭程序", bg=COLOR_CARD, fg=COLOR_TEXT,
-                 font=(FONT_FAMILY, 13, "bold")).pack(anchor="w")
-        tk.Label(body,
-                 text="「最小化到系统托盘」后程序在后台保持运行，点击托盘"
-                      "图标可随时打开并自动更新牌价；「直接退出」将关闭程序。",
+        pad = tk.Frame(dlg, bg=COLOR_CARD, padx=26, pady=22)
+        pad.pack(fill="both", expand=True)
+
+        # 头部：品牌徽标 + 标题（与主界面头部同款徽标、同字级层级）
+        head = tk.Frame(pad, bg=COLOR_CARD)
+        head.pack(fill="x")
+        mark = tk.Canvas(head, width=32, height=32, bg=COLOR_CARD,
+                         highlightthickness=0)
+        mark.pack(side="left", padx=(0, 10))
+        _rounded_rect(mark, 1, 1, 31, 31, 9, fill=COLOR_ACCENT, outline="")
+        mark.create_text(16, 17, text="¥", fill="white",
+                         font=(FONT_FAMILY, 13, "bold"))
+        tk.Label(head, text="关闭程序", bg=COLOR_CARD, fg=COLOR_TEXT,
+                 font=F_TITLE).pack(side="left")
+
+        # 说明文字：窄屏时按屏宽收窄折行，保证小屏完整可读
+        wrap = min(348, max(240, self.winfo_screenwidth() - 160))
+        tk.Label(pad, text="「最小化到系统托盘」后程序在后台保持运行，"
+                           "点击托盘图标可随时打开并自动更新牌价；"
+                           "「直接退出」将关闭程序。",
                  bg=COLOR_CARD, fg=COLOR_SUB, font=F_TAG,
-                 wraplength=300, justify="left").pack(anchor="w", pady=(8, 18))
+                 wraplength=wrap, justify="left",
+                 anchor="w").pack(fill="x", pady=(12, 18))
+
+        # 分隔线：与卡片内部同款
+        tk.Frame(pad, bg=COLOR_DIVIDER, height=1).pack(fill="x")
 
         def choose(action):
             dlg.grab_release()
@@ -736,25 +780,28 @@ class App(tk.Tk):
             self._close_dlg = None
             action()
 
-        btns = tk.Frame(body, bg=COLOR_CARD)
-        btns.pack(fill="x")
+        # 按钮区：主按钮居右（与主界面底部「刷新」主按钮位置一致），
+        # 幽灵次按钮在其左侧；字级/内边距对齐，两按钮等高
+        btns = tk.Frame(pad, bg=COLOR_CARD)
+        btns.pack(fill="x", pady=(16, 0))
         btn_tray = tk.Button(
             btns, text="最小化到系统托盘",
             command=lambda: choose(self._minimize_to_tray),
             font=F_BTN_MAIN, bg=COLOR_ACCENT, fg="white",
             activebackground=COLOR_ACCENT_DARK, activeforeground="white",
-            relief="flat", padx=16, pady=6, cursor="hand2", takefocus=0, bd=0)
-        btn_tray.pack(side="left")
+            relief="flat", padx=18, pady=7, cursor="hand2", takefocus=0,
+            bd=0)
+        btn_tray.pack(side="right")
         btn_exit = tk.Button(
             btns, text="直接退出",
             command=lambda: choose(self._quit_app),
-            font=F_BTN_SMALL, bg=COLOR_CARD, fg=COLOR_BTN_TEXT,
+            font=(FONT_FAMILY, 10), bg=COLOR_CARD, fg=COLOR_BTN_TEXT,
             activebackground=COLOR_BTN_ACTIVE,
             activeforeground=COLOR_BTN_TEXT_ACTIVE,
-            relief="flat", padx=14, pady=6, cursor="hand2", takefocus=0, bd=0,
-            highlightthickness=1, highlightbackground=COLOR_BORDER,
+            relief="flat", padx=14, pady=7, cursor="hand2", takefocus=0,
+            bd=0, highlightthickness=1, highlightbackground=COLOR_BORDER,
             highlightcolor=COLOR_BORDER)
-        btn_exit.pack(side="right")
+        btn_exit.pack(side="right", padx=(0, 8))
         _bind_hover(btn_tray, (COLOR_ACCENT, "white"),
                     (COLOR_ACCENT_DARK, "white"))
         _bind_hover(btn_exit, (COLOR_CARD, COLOR_BTN_TEXT),
@@ -764,7 +811,7 @@ class App(tk.Tk):
         dlg.bind("<Return>", lambda _e: choose(self._minimize_to_tray))
         dlg.protocol("WM_DELETE_WINDOW", lambda: choose(self._minimize_to_tray))
 
-        # 居中于主窗口，并钳制到屏幕内
+        # 居中于主窗口，并钳制到屏幕内（小屏/多屏拔插时弹窗始终完整可见）
         dlg.update_idletasks()
         try:
             x = self.winfo_rootx() + (self.winfo_width()
@@ -781,6 +828,7 @@ class App(tk.Tk):
         dlg.deiconify()
         dlg.lift()
         dlg.focus_force()
+        _round_window_corners(dlg)
         try:
             dlg.wait_visibility()
             dlg.grab_set()

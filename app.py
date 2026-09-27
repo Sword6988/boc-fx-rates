@@ -703,13 +703,17 @@ class App(tk.Tk):
         self._update_scrollbar()
 
     def _schedule_relayout(self, canvas_w):
-        """窗口宽度变化时按需重排列数（去抖 120ms，避免拖拽中频繁重排跳动）。"""
+        """窗口宽度变化时按需重排列数（去抖 80ms）。
+
+        去抖只为防止拖拽中列数在阈值边界来回翻转（重排本身开销很小），
+        80ms 足够吸收边界抖动，同时列数切换接近跟手。
+        """
         cols = self._desired_cols(canvas_w)
         if cols == self._cols:
             return
         if self._relayout_job is not None:
             self.after_cancel(self._relayout_job)
-        self._relayout_job = self.after(120, lambda: self._apply_cols(cols))
+        self._relayout_job = self.after(80, lambda: self._apply_cols(cols))
 
     def _apply_cols(self, cols):
         self._relayout_job = None

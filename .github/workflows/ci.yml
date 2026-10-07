@@ -6,6 +6,11 @@ on:
     tags: ['v*']
   pull_request:
 
+# 同一 workflow+ref 串行执行：连推标签时不并发构建/创建 Release
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -14,7 +19,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
-      # 测试已彻底不依赖 tkinter（纯标准库），Linux runner 即可跑全量离线测试
+      # 测试以纯标准库为主；GUI 相关断言在 Linux 上会自动跳过，仅跑纯函数部分
       - run: python run_tests.py
 
   # 推送 v* 标签时：测试通过后构建 exe 并创建 GitHub Release 附件
@@ -32,6 +37,21 @@ jobs:
           # pip 缓存：PyInstaller 安装命中缓存，省 1 分钟左右
           cache: pip
           cache-dependency-path: requirements-dev.txt
+      # 构建前校验 tag 与 version_info.txt 一致：避免产出「文件名版本 ≠ exe
+      # 内版本」的错版 Release（v1.9.2 → 期望 FileVersion 1.9.2.0）
+      - name: Verify tag matches version_info.txt
+        shell: pwsh
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          if ($tag -notmatch '^v(\d+)\.(\d+)\.(\d+)$') {
+            throw "Tag '$tag' does not look like vX.Y.Z"
+          }
+          $expected = "$($Matches[1]).$($Matches[2]).$($Matches[3]).0"
+          $vi = Get-Content -LiteralPath version_info.txt -Raw
+          if ($vi -notmatch [regex]::Escape("StringStruct('FileVersion', '$expected')")) {
+            throw "version_info.txt FileVersion != tag $tag (expected '$expected')"
+          }
+          Write-Host "Version check OK: $expected"
       - name: Install PyInstaller
         run: pip install -r requirements-dev.txt
       # GUI 冒烟：exe 构建前先在 runner 上验证程序能启动（含 tkinter/DPI/
@@ -41,14 +61,14 @@ jobs:
       - name: Build exe
         run: >
           python -m PyInstaller --onefile --windowed --clean
-          --name 外汇现汇买入价查询 --icon app_icon.ico
+          --name 中行汇率换算 --icon app_icon.ico
           --add-data "app_icon.ico;." --version-file version_info.txt
           boc_fx_rates.py
       # ASCII asset name with version (softprops mangles non-ASCII names)
       - name: Rename exe for release
         shell: pwsh
         run: >
-          Copy-Item "dist\外汇现汇买入价查询.exe"
+          Copy-Item "dist\中行汇率换算.exe"
           ("boc-fx-rates-{0}.exe" -f ${env:GITHUB_REF_NAME})
       - name: Create release with exe
         uses: softprops/action-gh-release@v2

@@ -11,6 +11,8 @@ TESTS = [
     "tests/test_parse.py",
     "tests/test_http.py",
     "tests/test_fetchall.py",
+    "tests/test_color.py",
+    "tests/test_consistency.py",
 ]
 
 

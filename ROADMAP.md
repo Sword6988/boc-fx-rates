@@ -22,7 +22,7 @@
 - **潜在风险**：低；需同步更新三个测试文件的 import 并全量回归。
 
 ### P2-2 【工程化】无 CI——而现在 CI 的前提条件恰好已具备
-- **现象**：v1.3.5 把 `config.py` 抽离后，三套测试已彻底不依赖 tkinter（纯标准库），但仓库没有 GitHub Actions。上次架构审查判 YAGNI 的理由（测试要 GUI）已失效。
+- **现象**：v1.3.5 把 `config.py` 抽离后，解析/抓取/配置类测试已不依赖 tkinter（纯标准库）；GUI 相关断言所在的 `tests/test_color.py` 也已拆分为「纯函数部分（从 `ui_utils` 导入，跨平台可跑）+ GUI 部分（非 Windows/无显示环境显式 SKIP）」。**（本项已实施：见 `.github/workflows/ci.yml`）**
 - **目标**：一条 workflow：push/PR 时 `python tests/test_parse.py`、`test_http.py`、`test_fetchall.py` 全绿。
 - **预期收益**：防回归零成本化；配合 tag 推送可在同一 workflow 里自动创建 Release + 传附件（本轮手工做了一遍，正需要固化）。
 - **实施成本**：小（一个 yaml，约 30 行；Release job 可复用 softprops/action-gh-release）。

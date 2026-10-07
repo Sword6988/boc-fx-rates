@@ -8,6 +8,7 @@ import os
 import socket
 import ssl
 import sys
+import tempfile
 import urllib.error
 from email.message import Message
 from unittest import mock
@@ -168,6 +169,32 @@ def test_fmt():
     print("fmt 小数位测试通过")
 
 
+def test_fmt_never_zero():
+    """反向换算（1 人民币 = X 外币）的极小值不得被舍入成 0。
+
+    固定小数位下 1e-9 会变成「0.000000」，等于没有信息；自适应后要么
+    给出非零小数，要么退化为科学计数法，但绝不显示 0。
+    同时约束输出长度 ≤ 8：数值列宽固定 8 字符，超长会顶出列宽。
+    """
+    for v in (1.0 / 7.1235, 1.0 / 0.0855, 5e-5, 1e-6, 9.9e-7, 1e-9, 1e-12):
+        s = fetcher.fmt(v)
+        assert float(s) != 0.0, "fmt(%r) 舍入成 0：%s" % (v, s)
+        assert len(s) <= 8, "fmt(%r) 超出数值列宽：%s" % (v, s)
+    assert fetcher.fmt(0.0) == "0"
+    assert fetcher.fmt(None) == "--"
+    print("fmt 非零保证与列宽上限测试通过")
+
+
+def test_load_config_inverse():
+    """换算方向：只接受严格布尔 true，其它类型一律按默认正向。"""
+    assert _load_with('{"inverse": true}')["inverse"] is True
+    assert _load_with('{"inverse": false}')["inverse"] is False
+    for bad in ('{"inverse": 1}', '{"inverse": "true"}', '{"inverse": "false"}',
+                '{"inverse": null}', '{"inverse": {}}', "{}"):
+        assert _load_with(bad)["inverse"] is False, bad
+    print("config inverse 方向解析测试通过")
+
+
 def test_fmt_time():
     assert _fmt_time("2026/08/26 20:50:26") == "2026-08-26 20:50"
     assert _fmt_time("2026-08-26 20:50:26") == "2026-08-26 20:50"
@@ -246,6 +273,19 @@ def test_load_config_unhashable_selected():
     print("config 不可哈希 selected 防御测试通过")
 
 
+def test_load_config_empty_selected():
+    """selected 为空列表是合法状态（币种面板「全部取消」），不回退默认。"""
+    cfg = _load_with('{"selected": []}')
+    assert cfg["selected"] == [], "显式全不选应被保留，不得悄悄恢复默认"
+    # 有条目但全部畸形 → 配置损坏，回退默认（与空列表区分开）
+    cfg2 = _load_with('{"selected": [{"a": 1}, 42]}')
+    assert cfg2["selected"] == [cur.code for cur in fetcher.CURRENCIES]
+    # 字段缺失 → 默认
+    cfg3 = _load_with('{"inverse": false}')
+    assert cfg3["selected"] == [cur.code for cur in fetcher.CURRENCIES]
+    print("config 空列表 selected 测试通过")
+
+
 def test_load_config_dedup_and_filter():
     """selected 去重、过滤非法代码、保留合法项。"""
     cfg = _load_with('{"selected": ["USD", "USD", "XXX", "RUB"]}')
@@ -285,29 +325,205 @@ def test_load_config_broken_json():
 
 # ------------------------- geometry 屏外钳制 -------------------------
 
+# ------------------------- 旧配置目录迁移 -------------------------
+
+def _mig_paths():
+    """构造临时 %APPDATA%：写入旧目录 config.json，返回 (appdata, old_path)。"""
+    import tempfile
+    import config as config_mod
+    appdata = tempfile.mkdtemp(prefix="fx_appdata_")
+    old_dir = os.path.join(appdata, config_mod.LEGACY_CONFIG_DIR_NAME)
+    os.makedirs(old_dir, exist_ok=True)
+    old_path = os.path.join(old_dir, "config.json")
+    return appdata, old_path
+
+
+def test_load_config_migrates_legacy_dir():
+    """产品改名后：旧目录 config.json 迁移到新目录，且旧文件保留不删除。"""
+    import config as config_mod
+    appdata, old_path = _mig_paths()
+    with open(old_path, "w", encoding="utf-8") as f:
+        f.write('{"selected": ["USD", "RUB"], "geometry": "640x480+10+10",'
+                ' "inverse": true}')
+    with mock.patch.dict(os.environ, {"APPDATA": appdata}):
+        cfg = config_mod._load_config()
+        new_path = os.path.join(appdata, config_mod.APP_TITLE, "config.json")
+    assert cfg["selected"] == ["USD", "RUB"], "应读到旧配置的选中币种"
+    assert cfg["geometry"] == "640x480+10+10", "应读到旧配置窗口尺寸"
+    assert cfg["inverse"] is True, "应读到旧配置换算方向"
+    assert os.path.exists(new_path), "新目录应已写入 config.json"
+    assert os.path.exists(old_path), "旧配置文件必须保留（零丢失，不删除）"
+    print("旧配置目录迁移测试通过")
+
+
+def test_load_config_migration_keeps_new_config():
+    """新目录已有配置时不覆盖；无旧配置（全新用户）时回退默认且不报错。"""
+    import config as config_mod
+    # 1) 新旧配置同时存在 → 保留新配置
+    appdata, old_path = _mig_paths()
+    with open(old_path, "w", encoding="utf-8") as f:
+        f.write('{"selected": ["RUB"], "inverse": true}')
+    new_dir = os.path.join(appdata, config_mod.APP_TITLE)
+    os.makedirs(new_dir, exist_ok=True)
+    with open(os.path.join(new_dir, "config.json"), "w", encoding="utf-8") as f:
+        f.write('{"selected": ["USD"], "inverse": false}')
+    with mock.patch.dict(os.environ, {"APPDATA": appdata}):
+        assert config_mod._load_config()["selected"] == ["USD"], \
+            "已有新配置时不应被旧配置覆盖"
+    # 2) 只有旧目录但旧 JSON 损坏 → 静默回退默认，不崩溃
+    appdata2, old_path2 = _mig_paths()
+    with open(old_path2, "w", encoding="utf-8") as f:
+        f.write("{not valid json")
+    with mock.patch.dict(os.environ, {"APPDATA": appdata2}):
+        cfg2 = config_mod._load_config()
+    assert cfg2["selected"] == [cur.code for cur in fetcher.CURRENCIES], \
+        "损坏的旧配置应回退默认币种"
+    # 3) 全新用户（无旧目录）→ 默认配置，不报错
+    import tempfile
+    with mock.patch.dict(os.environ,
+                         {"APPDATA": tempfile.mkdtemp(prefix="fx_appdata_")}):
+        cfg3 = config_mod._load_config()
+    assert cfg3["selected"] == [cur.code for cur in fetcher.CURRENCIES]
+    assert cfg3["geometry"] is None and cfg3["inverse"] is False
+    print("迁移边界（保留新配置 / 损坏 / 全新用户）测试通过")
+
+
 def test_clamp_geometry():
-    """屏外坐标钳回虚拟屏幕内（保留 80px 可见），屏内坐标不变。"""
+    """屏外坐标钳回虚拟屏幕内（保留 80px 可见），屏内坐标不变。
+
+    尺寸另有下限 470x380（与 app minsize 一致）：440 宽会被抬到 470。
+    """
     from config import _clamp_geometry
     pri = (0, 0, 1920, 1080)
-    # 屏外大坐标 → 钳到右/下边界内 80px
+    # 屏外大坐标 → 钳到右/下边界内 80px（宽度同时被抬到 470 下限）
     assert _clamp_geometry("440x380+99999+99999", screen=pri) == \
-        "440x380+1840+1000"
+        "470x380+1840+1000"
     # 负方向屏外 → 钳到左/上边界内 80px
     assert _clamp_geometry("440x380-500-500", screen=pri) == \
-        "440x380-360-300"
-    # 屏内坐标原样返回（正常使用行为不变）
+        "470x380-390-300"
+    # 屏内坐标原样返回（正常使用行为不变；尺寸抬到下限）
     assert _clamp_geometry("440x380+100+100", screen=pri) == \
-        "440x380+100+100"
+        "470x380+100+100"
     assert _clamp_geometry("640x480+1760+960", screen=pri) == \
         "640x480+1760+960"   # 右下角贴边（恰好在 hi 边界内）
     # 多屏：虚拟屏起点非 0（如左侧副屏）时按虚拟屏整体范围钳制
     assert _clamp_geometry("440x380+99999+99999",
                            screen=(-1920, 0, 3840, 1080)) == \
-        "440x380+1840+1000"
+        "470x380+1840+1000"
     # 无位置部分（仅 WxH）/ 畸形格式 → 原样返回
     assert _clamp_geometry("640x480", screen=pri) == "640x480"
     assert _clamp_geometry("garbage", screen=pri) == "garbage"
     print("geometry 屏外钳制测试通过")
+
+
+# ------------------------- 汇率合法性校验 -------------------------
+
+def test_valid_rate():
+    """_valid_rate：合法值原样返回，非法值一律 None。"""
+    assert fetcher._valid_rate("671.22") == 671.22, "数字字符串应被接受"
+    assert fetcher._valid_rate(2.5) == 2.5
+    assert fetcher._valid_rate("0.0758") == 0.0758
+    assert fetcher._valid_rate(float("nan")) is None
+    assert fetcher._valid_rate(float("inf")) is None
+    assert fetcher._valid_rate(float("-inf")) is None
+    assert fetcher._valid_rate(0) is None, "0 非法（会导致无穷/无意义）"
+    assert fetcher._valid_rate(-1.5) is None, "负数非法"
+    assert fetcher._valid_rate(1e5) is None, "等于上限（不含）应非法"
+    assert fetcher._valid_rate(1e6) is None, "超上限应非法"
+    assert fetcher._valid_rate("abc") is None, "非数字字符串非法"
+    assert fetcher._valid_rate(None) is None
+    print("_valid_rate 合法性校验测试通过")
+
+
+def test_fmt_invalid_values():
+    """fmt：nan/inf/负数 → \"--\"；0 仍为 \"0\"；正常值不变。"""
+    assert fetcher.fmt(float("nan")) == "--"
+    assert fetcher.fmt(float("inf")) == "--"
+    assert fetcher.fmt(float("-inf")) == "--"
+    assert fetcher.fmt(-1.5) == "--"
+    assert fetcher.fmt(0) == "0", "0 保持既有行为"
+    assert fetcher.fmt(0.0) == "0"
+    assert fetcher.fmt(671.22) == "671.22"
+    assert fetcher.fmt(None) == "--"
+    print("fmt 非法值 / 零值测试通过")
+
+
+# ------------------------- fetch_all 请求裁剪 / 0 行报错 -------------------------
+
+def test_fetch_all_pen_only_skips_boc():
+    """只选 PEN：不应发起中行牌价页请求。"""
+    def fake_pen():
+        return 2.0111, "open.er-api.com", "27 Aug 2026"
+
+    with mock.patch.object(fetcher, "fetch_boc_rates") as fb, \
+         mock.patch.object(fetcher, "fetch_pen_reference", fake_pen):
+        rows, err = fetcher.fetch_all(selected=["PEN"])
+    fb.assert_not_called()
+    assert set(rows) == {"PEN"}
+    assert rows["PEN"]["fallback"] is True
+    assert err is None
+    print("fetch_all 仅 PEN 不请求中行页测试通过")
+
+
+def test_fetch_all_boc_empty_rows_is_error():
+    """中行页请求成功但解析到 0 行 → 记为错误（不伪装成成功）。"""
+    def fake_pen():
+        return 2.0111, "open.er-api.com", "27 Aug 2026"
+
+    with mock.patch.object(fetcher, "fetch_boc_rates", lambda: {}), \
+         mock.patch.object(fetcher, "fetch_pen_reference", fake_pen):
+        rows, err = fetcher.fetch_all(selected=["USD", "PEN"])
+    assert err and "未解析到任何币种" in err, "0 行必须报错，err=%r" % err
+    assert set(rows) == {"PEN"}, "非 PEN 币种无数据，仅 PEN 由备用源兜底"
+    print("fetch_all 中行 0 行记为错误测试通过")
+
+
+def test_fetch_all_empty_selection():
+    """显式全不选：不请求任何数据源，直接返回空。"""
+    with mock.patch.object(fetcher, "fetch_boc_rates") as fb, \
+         mock.patch.object(fetcher, "fetch_pen_reference") as fp:
+        rows, err = fetcher.fetch_all(selected=[])
+    fb.assert_not_called()
+    fp.assert_not_called()
+    assert rows == {} and err is None
+    print("fetch_all 空选择提前返回测试通过")
+
+
+# ------------------------- 配置原子写 -------------------------
+
+def test_write_config_file_atomic():
+    """原子写：写后内容可读回、无 .tmp 残留；写入失败不抛异常。"""
+    import config as config_mod
+    d = tempfile.mkdtemp(prefix="fx_atomic_")
+    path = os.path.join(d, "config.json")
+    data = {"selected": ["USD"], "geometry": "470x380+0+0"}
+    config_mod._write_config_file(path, data)
+    with open(path, "r", encoding="utf-8") as f:
+        assert json.load(f) == data, "写后应能被 json.load 读回"
+    assert not os.path.exists(path + ".tmp"), "不应残留临时文件"
+    assert not [n for n in os.listdir(d) if n.endswith(".tmp")], \
+        "目录内不应有 .tmp 残留"
+    # 写入失败（path 指向一个已存在目录）→ 静默返回，不抛异常
+    dirpath = os.path.join(d, "as_dir")
+    os.makedirs(dirpath)
+    try:
+        config_mod._write_config_file(dirpath, data)
+    except Exception as e:
+        raise AssertionError("写入失败不应抛异常：%r" % e)
+    print("_write_config_file 原子写测试通过")
+
+
+# ------------------------- 几何尺寸上下界钳制 -------------------------
+
+def test_clamp_geometry_size_bounds():
+    """W/H 超虚拟屏被钳到屏内；小于 minsize 被抬到 470x380。"""
+    from config import _clamp_geometry
+    pri = (0, 0, 1920, 1080)
+    assert _clamp_geometry("99999x99999+0+0", screen=pri) == "1920x1080+0+0"
+    assert _clamp_geometry("99999x99999", screen=pri) == "1920x1080"
+    assert _clamp_geometry("300x200+0+0", screen=pri) == "470x380+0+0"
+    assert _clamp_geometry("300x200", screen=pri) == "470x380"
+    print("geometry 尺寸上界 / 下界钳制测试通过")
 
 
 if __name__ == "__main__":
@@ -321,13 +537,25 @@ if __name__ == "__main__":
     test_decode_html_garbage_replace()
     test_friendly_net_error()
     test_fmt()
+    test_fmt_never_zero()
     test_fmt_time()
     test_parse_header_column_offset()
     test_parse_default_column_order()
     test_parse_wanted_filter()
     test_load_config_unhashable_selected()
+    test_load_config_empty_selected()
     test_load_config_dedup_and_filter()
     test_load_config_malformed_geometry()
     test_load_config_broken_json()
+    test_load_config_inverse()
+    test_load_config_migrates_legacy_dir()
+    test_load_config_migration_keeps_new_config()
     test_clamp_geometry()
+    test_valid_rate()
+    test_fmt_invalid_values()
+    test_fetch_all_pen_only_skips_boc()
+    test_fetch_all_boc_empty_rows_is_error()
+    test_fetch_all_empty_selection()
+    test_write_config_file_atomic()
+    test_clamp_geometry_size_bounds()
     print("全部 fetch_all/工具函数离线测试通过")

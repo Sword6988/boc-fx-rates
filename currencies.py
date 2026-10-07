@@ -50,5 +50,10 @@ ALL_CURRENCIES = CURRENCIES + [
     Currency("阿联酋迪拉姆", "AED", "阿联酋迪拉姆", "AED"),
 ]
 
+# 反向换算（1 人民币 = X 外币）时的基准货币。
+# 刻意不放入 ALL_CURRENCIES：它是换算方向的另一端，不是可选的展示币种，
+# 加进去会混进币种下拉菜单并被持久化到 selected。
+BASE_CNY = Currency("人民币", "CNY", "人民币", "\u00a5")   # ¥
+
 # 币种代码 → 币种定义（供按代码快速索引）
 CODE_TO_CURRENCY = {cur.code: cur for cur in ALL_CURRENCIES}

@@ -8,6 +8,7 @@
 import html.parser
 import json
 import logging
+import math
 import re
 import socket
 import ssl
@@ -59,6 +60,18 @@ def _read_limited(resp):
     return data
 
 
+def _reject_insecure_redirect(resp):
+    """防重定向降级：最终地址必须是 https，否则视为不安全跳转。
+
+    证书降级分支（--insecure）与正常分支共用本函数，避免两处校验漂移。
+    响应无 geturl 时是 mock/非标准对象，跳过校验。
+    """
+    geturl = getattr(resp, "geturl", None)
+    final_url = geturl() if callable(geturl) else None
+    if isinstance(final_url, str) and not final_url.startswith("https://"):
+        raise ValueError("不安全的跳转（非 HTTPS）：%s" % final_url)
+
+
 def _http_get(url, timeout=15, retries=1):
     """GET 请求，返回 (响应字节, 响应头)。
 
@@ -77,6 +90,8 @@ def _http_get(url, timeout=15, retries=1):
     for attempt in range(retries + 1):
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
+                # 防重定向降级：最终地址必须是 https，否则视为不安全跳转
+                _reject_insecure_redirect(resp)
                 return _read_limited(resp), resp.headers
         except (urllib.error.URLError, TimeoutError, ConnectionError,
                 ssl.SSLError) as e:
@@ -89,6 +104,9 @@ def _http_get(url, timeout=15, retries=1):
                 ctx.check_hostname = False
                 ctx.verify_mode = ssl.CERT_NONE
                 with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+                    # 降级分支同样要挡住「被重定向到明文 http」——否则
+                    # --insecure 会在放弃证书校验之外再放宽传输层。
+                    _reject_insecure_redirect(resp)
                     return _read_limited(resp), resp.headers
             if attempt >= retries:
                 raise
@@ -163,6 +181,22 @@ def _decode_html(raw, headers):
     return raw.decode("utf-8-sig", "replace")
 
 
+def _valid_rate(x):
+    """规整候选汇率为合法 float；非法返回 None。
+
+    合法范围 0 < v < 1e5：下限非零（0 值无意义，且后续 /100、取倒数会产生
+    无穷）；上限拦截脏数据（占位符 / 明显异常的大数）。非数字、nan、inf
+    一律判非法。
+    """
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(v) or not (0.0 < v < 1e5):
+        return None
+    return v
+
+
 def parse_boc_html(text: str, wanted: Optional[Set[str]] = None) -> Dict[str, dict]:
     """从中行牌价页 HTML 提取现汇买入价（纯解析，可离线测试）。
 
@@ -194,9 +228,8 @@ def parse_boc_html(text: str, wanted: Optional[Set[str]] = None) -> Dict[str, di
         name = cells[name_idx]
         if not name or (wanted is not None and name not in wanted):
             continue
-        try:
-            buy = float(cells[buy_idx])
-        except (TypeError, ValueError):
+        buy = _valid_rate(cells[buy_idx])
+        if buy is None:
             continue
         joined = " ".join(cells)
         dm = re.search(r"\d{4}[/-]\d{1,2}[/-]\d{1,2}", joined)
@@ -231,7 +264,10 @@ def _fetch_pen_source(label, url):
         date = data.get("date", "")
     if rate is None:
         raise ValueError("响应中无 CNY 汇率")
-    return float(rate), label, date
+    v = _valid_rate(rate)
+    if v is None:
+        raise ValueError("备用源汇率非法")
+    return v, label, date
 
 
 def fetch_pen_reference():
@@ -313,20 +349,29 @@ def fetch_all(selected: Optional[list] = None
     """
     if selected is None:
         selected = [cur.code for cur in CURRENCIES]
+    if not selected:
+        return {}, None            # 显式全不选：无需请求任何数据源
     selected_set = set(selected)
     need_pen = "PEN" in selected_set
+    # 只有选择集中存在非 PEN 币种时，中行牌价页才可能提供数据
+    need_boc = any(code != "PEN" for code in selected_set)
 
     rows, errors = {}, []
     with ThreadPoolExecutor(max_workers=2) as pool:
-        fut_boc = pool.submit(fetch_boc_rates)
+        fut_boc = pool.submit(fetch_boc_rates) if need_boc else None
         fut_pen = pool.submit(fetch_pen_reference) if need_pen else None
 
-        try:
-            boc = fut_boc.result()
-        except Exception as e:
-            boc = {}
-            errors.append("中行牌价页获取失败（%s）" % _friendly_net_error(e))
-            logging.warning("中行牌价页获取失败", exc_info=True)
+        boc, boc_ok = {}, False
+        if fut_boc is not None:
+            try:
+                boc = fut_boc.result()
+                boc_ok = True
+            except Exception as e:
+                errors.append("中行牌价页获取失败（%s）" % _friendly_net_error(e))
+                logging.warning("中行牌价页获取失败", exc_info=True)
+        if boc_ok and need_boc and not boc:
+            # 请求成功却解析到 0 行：页面结构可能已变化，必须记错而非静默成功
+            errors.append("中行牌价页未解析到任何币种（页面结构可能已变化）")
 
         for cur in ALL_CURRENCIES:
             if cur.code not in selected_set:
@@ -361,11 +406,41 @@ def fetch_all(selected: Optional[list] = None
 
 
 def fmt(v: Optional[Union[int, float]]) -> str:
-    """按数值量级选择合适的小数位数。"""
+    """按数值量级选择合适的小数位数，并保证不会舍入成 0。
+
+    量级规则（与既有观感一致）：>=100 → 2 位；>=0.01 → 4 位；<0.01 → 6 位。
+
+    额外的「非零保证」：反向换算（1 人民币 = X 外币）在弱币种上会得到极小
+    值，例如 1/20000 = 0.00005；量级规则给 6 位尚可，但更极端的值会被
+    四舍五入成 0.000000——屏幕上只剩一个 0，等于没有信息。此时按「有效
+    小数」逐步增加位数（上限 6 位，即需求要求的 4~6 位区间），直到结果
+    非零；6 位仍为 0 说明该值小到常规小数无法表达，退化为紧凑科学计数
+    法而不是显示 0。
+
+    小数位上限刻意压在 6：数值列宽固定 8 字符（见 app 的 value 标签），
+    「0.000000」刚好 8 字符，再多会顶出列宽导致「人民币」位置漂移。
+    """
     if v is None:
         return "--"
+    v = float(v)
+    if not math.isfinite(v) or v < 0:
+        return "--"
+    if v == 0.0:
+        return "0"
     if v >= 100:
-        return "%.2f" % v
-    if v >= 0.01:
-        return "%.4f" % v
-    return "%.6f" % v
+        dp = 2
+    elif v >= 0.01:
+        dp = 4
+    else:
+        dp = 6
+    while dp <= _FMT_MAX_DP:
+        s = "%.*f" % (dp, v)
+        # 至少保留 4 位有效小数：舍入后非零即采用
+        if float(s) != 0.0:
+            return s
+        dp += 1
+    return "%.0e" % v
+
+
+# 自适应小数位上限（=数值列宽可容纳的最大小数位，见上方说明）
+_FMT_MAX_DP = 6

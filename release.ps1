@@ -10,7 +10,7 @@ $ErrorActionPreference = "Stop"
 
 $repo = "Sword6988/boc-fx-rates"
 # App name built from code points (ASCII-safe, same as build.ps1).
-$appName = -join ([char[]](0x5916,0x6c47,0x73b0,0x6c47,0x4e70,0x5165,0x4ef7,0x67e5,0x8be2))
+$appName = -join ([char[]](0x4e2d,0x884c,0x6c47,0x7387,0x6362,0x7b97))
 
 Push-Location $PSScriptRoot
 try {
@@ -49,6 +49,18 @@ try {
     # 5. Create tag if missing, push branch + tag
     # Retries: the local proxy intermittently aborts the CONNECT tunnel (502 /
     # schannel close_notify); a retry usually succeeds.
+    # Refuse if the remote tag exists at a different commit (avoid wrong release)
+    $remoteRef = & git ls-remote --tags origin "refs/tags/$Tag"
+    if ($remoteRef) {
+        $remoteSha = ((($remoteRef | Select-Object -First 1) -split '\s+')[0]).Trim()
+        $localRef = & git rev-parse --verify --quiet "refs/tags/$Tag"
+        if (-not $localRef) { $localRef = & git rev-parse --verify HEAD }
+        $localSha = (($localRef | Select-Object -First 1)).Trim()
+        if ($remoteSha -ne $localSha) {
+            throw "Remote tag $Tag exists at $remoteSha but local is $localSha; refusing to overwrite"
+        }
+        Write-Host "Remote tag $Tag already at $localSha (OK)"
+    }
     $localTag = & git tag --list $Tag
     if (-not $localTag) { & git tag $Tag }
     foreach ($what in @("main", $Tag)) {
@@ -69,7 +81,11 @@ try {
     if (-not $token) { throw "No GitHub credential found via git credential fill" }
     $auth = "Authorization: token $token"
 
-    if ($NotesFile -and (Test-Path -LiteralPath $NotesFile)) {
+    if ($NotesFile) {
+        # An explicitly passed notes file must exist; silent fallback hides typos
+        if (-not (Test-Path -LiteralPath $NotesFile)) {
+            throw "NotesFile not found: $NotesFile"
+        }
         $notes = [System.IO.File]::ReadAllText(
             (Resolve-Path -LiteralPath $NotesFile).Path,
             [System.Text.Encoding]::UTF8)
@@ -104,7 +120,15 @@ try {
         -o $upFile
     $up = [System.IO.File]::ReadAllText($upFile,
         [System.Text.Encoding]::UTF8) | ConvertFrom-Json
-    if ($up.state -ne "uploaded") { throw "Asset upload failed: $($up | ConvertTo-Json -Depth 3)" }
+    if ($up.state -ne "uploaded") {
+        # Release created but asset missing: give explicit remediation steps
+        Write-Host "WARNING: release was created but the asset upload FAILED (half-finished release)."
+        Write-Host "Release URL: $($resp.html_url)"
+        Write-Host "Remediation: delete this release and re-run, or upload manually:"
+        Write-Host "  gh release delete $Tag --yes"
+        Write-Host "  gh release upload $Tag `"$assetTmp`" --clobber"
+        throw "Asset upload failed: $($up | ConvertTo-Json -Depth 3)"
+    }
     Write-Host "Asset uploaded: $($up.browser_download_url)"
     Write-Host "[6/6] Release OK: $Tag"
 } finally {

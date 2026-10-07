@@ -2,8 +2,8 @@
 # Kept ASCII-only so it parses correctly regardless of console codepage.
 $ErrorActionPreference = "Stop"
 
-# App name "外汇现汇买入价查询" built from code points (ASCII-safe).
-$appName = -join ([char[]](0x5916,0x6c47,0x73b0,0x6c47,0x4e70,0x5165,0x4ef7,0x67e5,0x8be2))
+# App name "中行汇率换算" built from code points (ASCII-safe).
+$appName = -join ([char[]](0x4e2d,0x884c,0x6c47,0x7387,0x6362,0x7b97))
 
 Push-Location $PSScriptRoot
 try {

@@ -97,7 +97,7 @@ user32.AppendMenuW.restype = wt.BOOL
 user32.TrackPopupMenu.argtypes = [wt.HMENU, wt.UINT, ctypes.c_int,
                                   ctypes.c_int, ctypes.c_int, wt.HWND,
                                   ctypes.c_void_p]
-user32.TrackPopupMenu.restype = wt.BOOL
+user32.TrackPopupMenu.restype = wt.UINT   # 带 TPM_RETURNCMD，返回命令 ID
 user32.DestroyMenu.argtypes = [wt.HMENU]
 user32.DestroyMenu.restype = wt.BOOL
 user32.GetCursorPos.argtypes = [ctypes.POINTER(_POINT)]
@@ -202,6 +202,11 @@ class TrayController:
     # ---------- 内部实现 ----------
 
     def _add_icon(self):
+        # explorer 重启（TaskbarCreated）后会重新注册图标：旧 HICON 已失效，
+        # 先释放避免句柄泄漏
+        if self._hicon:
+            user32.DestroyIcon(self._hicon)
+            self._hicon = None
         hicon = self._load_icon()
         nid = NOTIFYICONDATAW()
         nid.cbSize = ctypes.sizeof(NOTIFYICONDATAW)

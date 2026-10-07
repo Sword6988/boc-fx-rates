@@ -45,6 +45,7 @@ from tray import WM_APP_TRAY, WM_LBUTTONUP, TrayController
 # 纯函数工具（颜色插值/缓动）放在 ui_utils，便于在无显示环境（含 Linux CI）
 # 直接导入测试；此处按原名引入，其余代码无需感知这次拆分。
 from ui_utils import ease_out_cubic as _ease_out_cubic
+from ui_utils import ease_out_quad as _ease_out_quad
 from ui_utils import lin as _lin
 from ui_utils import mix_color as _mix_color
 from ui_utils import norm_color as _norm_color
@@ -950,7 +951,8 @@ class App(tk.Tk):
         self._measure_key = None    # 上次测量对应的币种集合（用于方向切换时复用）
         self._drag = None           # 卡片拖拽状态（dict，无拖拽时 None）
         self._drag_scroll_job = None  # 拖拽边缘自动滚动的 after 任务句柄
-        self._drag_rects = None     # 拖拽动画期间的目标槽位矩形（code→(x,y,w,h)）
+        # 拖拽期间缓存的槽位矩形表 [(x,y,w,h)]，索引=槽位号；拖拽期不变
+        self._drag_slots = None
         self._outer = None          # 内容区的父容器（用于读取窗口宽）
         self._disp_by_code = {cur.code: cur.display for cur in ALL_CURRENCIES}
         # 选中币种与窗口尺寸（持久化到 %APPDATA%）
@@ -1283,6 +1285,9 @@ class App(tk.Tk):
         继续跑——拖拽自动滚动链是 40ms 自续，会持续访问已销毁的画布抛
         TclError 落 crash.log，且 _drag 残留指向已不存在的 code；复制反馈链
         的 restore/snap_finish 没有 winfo_exists 守卫，会向废弃字典续链约 1s。
+        列数/拖拽 place 动画链（_morph_job）同理必须取消：它持有旧卡片与
+        cards_frame 的冻结高度，卡片即将被销毁重建，不清理会向已销毁控件
+        place、且残留冻结高度把「请求高度」钉死（收缩后整片空白）。
         """
         if self._drag_scroll_job is not None:
             try:
@@ -1290,8 +1295,15 @@ class App(tk.Tk):
             except Exception:
                 pass
             self._drag_scroll_job = None
+        if self._morph_job is not None:
+            try:
+                self.after_cancel(self._morph_job)
+            except Exception:
+                pass
+            self._morph_job = None
+        self.cards_frame.configure(height=0)   # 解冻：交还 grid 按内容计算高度
         self._drag = None
-        self._drag_rects = None
+        self._drag_slots = None
         for info in self.cards.values():
             job = info.get("flash_after")
             if job is not None:
@@ -1494,11 +1506,78 @@ class App(tk.Tk):
             return
         self._update_scrollbar()
 
-    def _morph_relayout(self, ms=None, steps=None):
-        """FLIP 式重排过渡（列数变化与拖拽换位共用）。
+    def _animate_place(self, anim, total_ms, total_steps, ease, on_finish=None):
+        """通用 place 缓动驱动（列数重排与拖拽换位共用）。
 
-        ms/steps 可覆盖默认节奏：拖拽换位传更快的小步数（160ms/8 步），
-        跟手但不生硬；列数变化用默认 220ms/11 步，更从容。
+        anim: [(widget, start_rect, target_rect)]。调用方负责算出起点（可以是
+        上一条链的插值中间态——重入时从当前位置续动，不跳变）。
+        ease: 缓动函数——列数重排用 _ease_out_cubic（结构性变化，从容减速），
+        拖拽换位用 _ease_out_quad（交互反馈，起手快尾巴短）。
+        on_finish: 末帧回调（列数重排用它还原 grid；拖拽换位用它判断是否
+        交还 grid）。
+        """
+        # 开链前取消旧链（重入取消）：起点由调用方从「当前位置」取，续动不跳变
+        if getattr(self, "_morph_job", None) is not None:
+            try:
+                self.after_cancel(self._morph_job)
+            except Exception:
+                pass
+            self._morph_job = None
+
+        # 先把每张卡 place 到起点几何（place 接管会自动解除 grid），保证
+        # 首帧就在原位——不先落位会让卡片在目标位置闪现一帧再跳回起点附近，
+        # 产生肉眼可见的往复跳动
+        for w, s, _tg in anim:
+            try:
+                w.place(x=s[0], y=s[1], width=s[2], height=s[3])
+            except tk.TclError:
+                self._morph_cleanup()    # 不留 place 中间态/冻结高度
+                return
+
+        # 动画期间冻结框架高度：place 管理的子控件不贡献请求高度，不冻结
+        # 会让 cards_frame 瞬间塌缩、滚动条跳动（须在 place 之后读取高度）
+        frozen_h = self.cards_frame.winfo_height()
+        self.cards_frame.configure(height=frozen_h)
+
+        step_ms = max(12, total_ms // total_steps)
+
+        def finish():
+            # 收尾（幂等）：先清 job，再交给调用方回调（末帧即终态帧的修复
+            # 由调用方在其回调里保证）
+            self._morph_job = None
+            if on_finish is not None:
+                on_finish()
+
+        def step(i):
+            # 采样 t = (i+1)/steps（i 从 0 到 steps-1）；ease-out，首帧即有
+            # 进度（无空转帧），末次 t=1.0 → e 精确 = 1.0
+            t = (i + 1) / total_steps
+            e = ease(t)
+            # 逐帧只做 place 更新：测量类调用只在动画开始前做一次
+            for w, s, tg in anim:
+                try:
+                    w.place(x=round(s[0] + (tg[0] - s[0]) * e),
+                            y=round(s[1] + (tg[1] - s[1]) * e),
+                            width=round(s[2] + (tg[2] - s[2]) * e),
+                            height=round(s[3] + (tg[3] - s[3]) * e))
+                except tk.TclError:
+                    self._morph_cleanup()    # 不留 place 中间态/冻结高度
+                    return
+            if i + 1 < total_steps:
+                self._morph_job = self.after(step_ms,
+                                             lambda: step(i + 1))
+            else:
+                # 末次（t=1.0, e=1.0）：不再 place，直接以收尾帧落定
+                finish()
+
+        self._morph_job = self.after(step_ms, lambda: step(0))
+
+    def _morph_relayout(self, ms=None, steps=None):
+        """FLIP 式重排过渡（列数变化路径）。
+
+        ms/steps 可覆盖默认节奏：列数变化用默认 220ms/11 步，更从容。
+        拖拽换位不再走本函数（改为 _animate_slots——拖拽期零 grid 重排），
+        故此处缓动固定用 _ease_out_cubic。
         """
         if not self.cards:
             return
@@ -1506,9 +1585,7 @@ class App(tk.Tk):
         total_steps = self.RELAYOUT_STEPS if steps is None else steps
 
         # 动画进行中再次重排：取消旧链，但**保留卡片当前的 place 插值位置**
-        # 作为新起点——连续换位/变列时动画从当前位置继续，不跳变、不重置。
-        # 高度解冻放在主流程（同一次回调内 layout 立刻跟上，无重绘间隙；
-        # 所有早退路径都会把卡片归还 grid，不会残留冻结/中间态）。
+        # 作为新起点——连续变列时动画从当前位置继续，不跳变、不重置。
         if getattr(self, "_morph_job", None) is not None:
             try:
                 self.after_cancel(self._morph_job)
@@ -1527,15 +1604,6 @@ class App(tk.Tk):
         self.cards_frame.configure(height=0)   # 解冻上一条链的冻结高度
         self._layout_cards()          # 新布局 grid（place 会被 grid 接管）
         self.update_idletasks()       # 让 grid 立即算出目标几何（仅此一次测量）
-
-        # 拖拽换位时：此刻的 grid 几何就是「目标槽位」。动画期间 winfo 读到
-        # 的是插值值，命中判定必须用这里预存的目标矩形（_drag_rects）。
-        if getattr(self, "_drag", None) and self._drag.get("started"):
-            code_by_w = {self.cards[c]["card"]: c for c in self.cards}
-            self._drag_rects = {
-                code_by_w[w]: (w.winfo_x(), w.winfo_y(),
-                               w.winfo_width(), w.winfo_height())
-                for w in code_by_w}
 
         anim = []
         for w in cards:
@@ -1556,24 +1624,8 @@ class App(tk.Tk):
             self._update_scrollbar()
             return
 
-        # 先把所有卡片 place 到起点几何（place 接管会自动解除 grid），
-        # 保证动画首帧就在原位——不先落位会让卡片在目标位置闪现一帧
-        # 再跳回起点附近，产生肉眼可见的往复跳动
-        for w, s, tg in anim:
-            try:
-                w.place(x=s[0], y=s[1], width=s[2], height=s[3])
-            except tk.TclError:
-                return
-
-        # 动画期间冻结框架高度：place 管理的子控件不贡献请求高度，
-        # 不冻结会让 cards_frame 瞬间塌缩、滚动条跳动
-        frozen_h = self.cards_frame.winfo_height()
-        self.cards_frame.configure(height=frozen_h)
-
-        step_ms = max(12, total_ms // total_steps)
-
-        def finish():
-            """收尾（幂等）：先还原 grid 并强制算好几何，再清 job。
+        def on_grid_finish():
+            """收尾（幂等）：第一帧就地把 grid 还原并强制算好几何。
 
             缺陷 A 修复要点：让「最后一帧就是 grid 帧」。旧实现最后一帧
             先把卡片 place 到实测目标几何、随后才 configure(height=0) +
@@ -1584,7 +1636,6 @@ class App(tk.Tk):
             _layout_cards），并 update_idletasks() 保证 grid 几何已算出，
             全程不再 place → 不存在「place 帧 ≠ grid 帧」的错位帧。
             """
-            self._morph_job = None
             self.cards_frame.configure(height=0)   # 交还 grid 按内容计算高度
             self._layout_cards()                   # grid 接管（自动解除 place）
             try:
@@ -1593,29 +1644,9 @@ class App(tk.Tk):
                 return
             self._update_scrollbar()
 
-        def step(i):
-            # 采样 t = (i+1)/steps（i 从 0 到 steps-1）；ease-out，首帧即有
-            # 进度（无空转帧），末次 t=1.0 → e 精确 = 1.0
-            t = (i + 1) / total_steps
-            e = _ease_out_cubic(t)
-            # 逐帧只做 place 更新：测量类调用只在动画开始前做一次
-            for w, s, tg in anim:
-                try:
-                    w.place(x=round(s[0] + (tg[0] - s[0]) * e),
-                            y=round(s[1] + (tg[1] - s[1]) * e),
-                            width=round(s[2] + (tg[2] - s[2]) * e),
-                            height=round(s[3] + (tg[3] - s[3]) * e))
-                except tk.TclError:
-                    self._morph_cleanup()    # 不留 place 中间态/冻结高度
-                    return
-            if i + 1 < total_steps:
-                self._morph_job = self.after(step_ms,
-                                             lambda: step(i + 1))
-            else:
-                # 末次（t=1.0, e=1.0）：不再 place，直接以 grid 帧收尾
-                finish()
+        self._animate_place(anim, total_ms, total_steps, _ease_out_cubic,
+                            on_finish=on_grid_finish)
 
-        self._morph_job = self.after(step_ms, lambda: step(0))
 
     def _layout_cards(self):
         """将当前卡片按 _cols 列用 grid 重排（行优先），列宽均分、同行等高。"""
@@ -1639,14 +1670,135 @@ class App(tk.Tk):
     # 不隐去、不透明（用户反馈）——红色描边高亮 + 置顶表示「抓起」；也不
     # 跟随鼠标逐帧移动（place 连续移动的窗口在 Tk/Windows 下旧位置重绘
     # 滞后会留拖影，同为用户反馈）。鼠标越过其它卡片矩形时，全部卡片
-    # （含被拖卡）以 FLIP 过渡滑到新槽位（复用 morph 链，160ms/8 步——
+    # （含被拖卡）以 FLIP 过渡滑到新槽位（160ms/8 步、_ease_out_quad——
     # 纯瞬间跳位被反馈为「生硬」，短过渡既有位移反馈又不产生拖影）。
-    # 动画期间命中判定用 morph 预存的目标矩形（_drag_rects），不依赖
-    # 插值中的 winfo 几何。松开恢复描边并保存顺序（selected 字段本身即
-    # 顺序）。阈值内的按下-松开不进入拖拽，双击复制不受影响。
+    #
+    # 性能要点：拖拽期间「槽位总数与几何」不变，变的只是「哪张卡占哪个
+    # 槽位」。因此换位纯做 place 动画（_animate_slots，零 grid 重排）。
+    # 槽位矩形表与「全部卡片落位到 place 态」**推迟到首次真正跨卡时**才做
+    # （_drag_begin_slots，由 _drag_reorder 触发，整段拖拽只此一次）：在真正
+    # 需要换位之前卡片一直留在 grid 态（零成本、零风险）。首次跨卡时顺序尚未
+    # 改变，各卡的 grid 几何即槽位几何，直接 winfo 读取即可，无需任何
+    # _layout_cards。实测（30 卡 / 3 列）：若在「进入拖拽」时就做这一步，需
+    # update_idletasks(≈26ms，被拖卡描边由 1px 改 2px 触发 grid 全表重排) +
+    # 30 次 place(≈10ms)，起拖瞬间阻塞 ≈37ms；推迟后起拖只剩描边 config +
+    # lift（≈0.2ms），而这 ≈37ms 移到首次跨卡（该处本来就要付一次 160ms 换位
+    # 动画）。松手时再交还 grid 一次（_return_to_grid）。旧实现每次换位都跑
+    # 两遍 grid 全表重排（setup 一次、finish 一次），30 卡下约 206ms 纯阻塞，
+    # 是「顿挫」主因。
+    # 命中判定用「槽位矩形表」_drag_slots（按槽位号索引）；首次跨卡前该表
+    # 为 None，此时回退读各卡的 grid winfo（等价，因为顺序尚未改变）。
+    # 松开恢复描边并保存顺序（selected 字段本身即顺序）。阈值内的按下-松开
+    # 不进入拖拽，双击复制不受影响。
     # 注意：顺序必须同时写 _selected 与 _selected_curs——_layout_cards/
     # morph 按 _selected_curs 排布，只改 _selected 的话，拖拽后一次
     # 窗口缩放就会把视觉顺序打回旧序（探针实测踩坑）。
+
+    def _drag_begin_slots(self):
+        """建立槽位矩形表并把全部卡片落位到 place 态（拖拽期只做一次）。
+
+        调用时机是**首次真正跨卡**（_drag_reorder），而非「进入拖拽」——在真正
+        需要换位之前卡片继续留在 grid 态（零成本、零风险）。此刻顺序尚未改变，
+        各卡的 grid 几何即槽位几何，故无需任何 _layout_cards，只需 read + place。
+        拖拽中改窗口尺寸时（_drag_resync）会重算一次，属必要。
+
+        **必须把全部卡片都 place**（而非只 place 换位的几张）：place 会把卡片
+        移出 grid，若只移出部分，grid 会按剩余子控件重排行高——被拖卡因描边加厚
+        请求高多 2px，该行会塌缩 2px，产生可见抖动（上一轮专门消除过这类 1~2px
+        偏差）。全部 place 后 grid 无子控件，几何冻结，无重排。
+        """
+        try:
+            self.update_idletasks()          # 确保 grid 几何新鲜
+        except tk.TclError:
+            return
+        cards = [self.cards[c.code]["card"] for c in self._selected_curs]
+        self._drag_slots = [(w.winfo_x(), w.winfo_y(),
+                             w.winfo_width(), w.winfo_height()) for w in cards]
+        for w, (x, y, ww, hh) in zip(cards, self._drag_slots):
+            try:
+                w.place(x=x, y=y, width=ww, height=hh)
+            except tk.TclError:
+                return
+        # place 的子控件不贡献请求高度：必须冻结 frame 高度，否则瞬间塌缩、
+        # 滚动条跳动（读 winfo_height 须在 place 之后、且中间不 update_idletasks）
+        self.cards_frame.configure(height=self.cards_frame.winfo_height())
+
+    def _return_to_grid(self):
+        """把卡片交还 grid（整个拖拽期只调用一次）。幂等。"""
+        self._drag_slots = None
+        self.cards_frame.configure(height=0)   # 交还 grid 按内容计算高度
+        self._layout_cards()
+        try:
+            self.update_idletasks()
+        except tk.TclError:
+            return
+        self._update_scrollbar()
+
+    def _after_drag_flip(self):
+        """换位动画收尾：拖拽仍在进行就继续留在 place 态（下次换位零重排），
+        否则交还 grid。"""
+        if self._drag and self._drag.get("started"):
+            return
+        self._return_to_grid()
+
+    def _animate_slots(self, ms=None, steps=None):
+        """把每张卡从当前位置缓动到它在新顺序下对应的槽位（纯 place，无 grid 重排）。"""
+        slots = self._drag_slots or []
+        anim = []
+        for idx, cur in enumerate(self._selected_curs):
+            if idx >= len(slots):
+                continue
+            w = self.cards[cur.code]["card"]
+            try:
+                st = (w.winfo_x(), w.winfo_y(),
+                      w.winfo_width(), w.winfo_height())
+            except tk.TclError:
+                continue
+            tg = slots[idx]
+            if st == tg:
+                continue
+            anim.append((w, st, tg))
+        if not anim:
+            return
+        # 减少动画：瞬时落位到目标（仍**不走 grid**——这也是减少动画档的提速点）；
+        # 无 morph 链，松手时由 _drag_release 交还 grid。
+        if _reduced_motion():
+            for w, _st, tg in anim:
+                try:
+                    w.place(x=tg[0], y=tg[1], width=tg[2], height=tg[3])
+                except tk.TclError:
+                    self._morph_cleanup()
+                    return
+            return
+        self._animate_place(anim, ms or DRAG_FLIP_MS, steps or DRAG_FLIP_STEPS,
+                            _ease_out_quad, on_finish=self._after_drag_flip)
+
+    def _drag_resync(self):
+        """拖拽中画布宽度变化：槽位表失效，重算一次并重新落位。
+
+        这是唯一为「拖拽中改窗口尺寸」付的一次全量重排，属必要：宽度变了
+        槽位几何就变了，缓存表必须重建。
+        """
+        if getattr(self, "_morph_job", None) is not None:
+            try:
+                self.after_cancel(self._morph_job)
+            except Exception:
+                pass
+            self._morph_job = None
+        self.cards_frame.configure(height=0)
+        self._layout_cards()
+        try:
+            self.update_idletasks()
+        except tk.TclError:
+            return
+        self._drag_begin_slots()
+        # _layout_cards/place 会打乱层级与描边，重新置顶并恢复被拖卡描边
+        code = self._drag.get("code") if self._drag else None
+        if code and code in self.cards:
+            card = self.cards[code]["card"]
+            card.config(highlightthickness=2, highlightbackground=COLOR_ACCENT,
+                        highlightcolor=COLOR_ACCENT)
+            card.lift()
 
     def _drag_press(self, _e, code):
         """按下卡片：仅记录候选拖拽信息，移动超阈值后才真正进入拖拽。"""
@@ -1672,7 +1824,12 @@ class App(tk.Tk):
             self._drag_scroll_job = self.after(40, self._drag_autoscroll)
 
     def _drag_lift(self):
-        """进入拖拽：被拖卡红色描边高亮表示「抓起」并置顶，位置原地不动。"""
+        """进入拖拽：被拖卡红色描边高亮表示「抓起」并置顶，位置原地不动。
+
+        这里**不**做任何布局工作——槽位表与「全部卡片落位」推迟到首次真正跨卡
+        时由 _drag_begin_slots 完成（见上方性能要点）。因此起拖瞬间零阻塞：
+        实测 30 卡下本函数 ≈0.2ms（对比：若在此把 30 张卡全部 place 需 ≈37ms）。
+        """
         card = self.cards[self._drag["code"]]["card"]
         card.config(highlightthickness=2, highlightbackground=COLOR_ACCENT,
                     highlightcolor=COLOR_ACCENT)
@@ -1684,21 +1841,24 @@ class App(tk.Tk):
     def _drag_move_xy(self, x_root, y_root):
         """按 root 坐标做命中判定（自动滚动后可用同一坐标重跑）。
 
-        鼠标越过其它卡片矩形时更新顺序，全部卡片以 FLIP 过渡滑到新槽位。
-        命中判定优先用 _drag_rects（reorder 时预存的「目标槽位」矩形）：
-        FLIP 动画期间 winfo 读到的是插值中间值，用它判定会抖动/漏判。
+        鼠标越过其它卡片矩形时更新顺序，交错的卡片以 FLIP 过渡滑到新槽位。
+        命中判定优先用槽位矩形表 _drag_slots（索引=槽位号）：拖拽期 place 动画
+        会改变卡片当前几何，winfo 读到的是插值中间值，用它判定会抖动/漏判。
+        **首次跨卡前该表尚为 None**（_drag_begin_slots 未跑）：此时卡片都还在
+        grid 态、顺序也未改变，逐卡回退读 winfo 恰好等于槽位几何——等价。
         """
         d = self._drag
         frame = self.cards_frame
         mx = x_root - frame.winfo_rootx()
         my = y_root - frame.winfo_rooty()
         cur_i = self._selected.index(d["code"])
-        rects = getattr(self, "_drag_rects", None) or {}
+        slots = self._drag_slots or []
         for i, code in enumerate(self._selected):
             if code == d["code"]:
                 continue
-            r = rects.get(code)
-            if r is None:
+            if i < len(slots):
+                r = slots[i]
+            else:
                 w = self.cards[code]["card"]
                 r = (w.winfo_x(), w.winfo_y(), w.winfo_width(), w.winfo_height())
             if r[0] <= mx < r[0] + r[2] and r[1] <= my < r[1] + r[3]:
@@ -1707,20 +1867,23 @@ class App(tk.Tk):
                 break
 
     def _drag_reorder(self, i):
-        """两份顺序列表同步重排，跨卡后全部卡片以 FLIP 过渡滑到新槽位。
+        """两份顺序列表同步重排，跨卡后全部卡片纯 place 滑到新槽位。
 
         _selected_curs 必须与 _selected 同步：_layout_cards/morph 都按
         _selected_curs 排布，漏掉它则拖拽结果在下次窗口缩放时被打回。
-        动画复用 morph 链（更快的 160ms/8 步，跟手不生硬）；动画期间
-        命中判定用 morph 预存的目标矩形（_drag_rects）。
+        **首次跨卡时才建立槽位表并落位全部卡片**（_drag_begin_slots，只此一次）：
+        此前卡片一直留在 grid 态。之后由 _animate_slots 按槽位表做 160ms/8 步的
+        place 缓动（_ease_out_quad），零全量 grid 重排。
         """
+        if self._drag_slots is None:
+            self._drag_begin_slots()
         code = self._drag["code"]
         self._selected.remove(code)
         self._selected.insert(i, code)
         cur = next(c for c in self._selected_curs if c.code == code)
         self._selected_curs.remove(cur)
         self._selected_curs.insert(i, cur)
-        self._morph_relayout(ms=DRAG_FLIP_MS, steps=DRAG_FLIP_STEPS)
+        self._animate_slots()
 
     def _scroll_canvas_px(self, dy):
         """按像素滚动卡片区。
@@ -1778,7 +1941,12 @@ class App(tk.Tk):
             self._drag_scroll_job = None
 
     def _drag_release(self, _e, code):
-        """松开：恢复描边、保存新顺序，并补评估拖拽期间错过的列数变化。"""
+        """松开：恢复描边、把卡片交还 grid、保存新顺序，并补评估列数变化。
+
+        self._drag 必须**先**置 None：在途换位动画的 _after_drag_flip 据此
+        判断拖拽已结束、末帧交还 grid。若此刻动画仍在途（_morph_job 非 None），
+        则不立即交还——保留「松手后动画跑完再落定」的观感，由末帧回调收尾。
+        """
         d = self._drag
         self._drag = None
         if self._drag_scroll_job is not None:
@@ -1789,7 +1957,24 @@ class App(tk.Tk):
         self.cards[code]["card"].config(
             highlightthickness=1, highlightbackground=COLOR_BORDER,
             highlightcolor=COLOR_BORDER)
-        self._drag_rects = None
+        # 拖拽期是否真的把卡片落位过 place（=是否跨过卡）。用于松手时决定要不要
+        # 交还 grid：从未跨卡则卡片一直在 grid、高度也没冻结，无需任何重排
+        # （省掉 _return_to_grid 的一次全表 grid + 刷新，30 卡下约 145ms）。
+        placed = self._drag_slots is not None
+        # 无条件清空槽位表：松手即断开拖拽态。不能只在 _morph_job is None 时
+        # 依赖在途链的 _after_drag_flip 来清——松手会经 _schedule_relayout
+        # 在 80ms 后触发列数重排（_morph_relayout → _animate_place），后者
+        # 会取消在途的换位链并替换其 on_finish，换位链的 _after_drag_flip
+        # 便永不执行，唯一清 _drag_slots 的 _return_to_grid 被跳过 → 残留。
+        # _return_to_grid 内部同样清一次（幂等，保留）。
+        self._drag_slots = None
+        if self._morph_job is None:
+            if placed:
+                self._return_to_grid()
+            else:
+                # 从未跨卡：只补一次滚动条（描边厚度往返可能让内容高变 2px）
+                self._update_scrollbar()
+        # 否则：在途动画末帧的 _after_drag_flip 会看到 _drag 已 None 并交还 grid
         _save_config(self._selected, self.geometry(), self._inverse)
         # 拖拽中 _apply_cols 会给列数变化让路；松开后补一次评估
         self._schedule_relayout(self.card_canvas.winfo_width())
@@ -1877,7 +2062,10 @@ class App(tk.Tk):
 
     def _on_canvas_resize(self, e):
         self.card_canvas.itemconfigure(self._cards_win, width=e.width)
-        self._schedule_relayout(e.width)
+        if self._drag and self._drag.get("started"):
+            self._drag_resync()      # 拖拽中宽度变化：槽位表失效，需重算一次
+        else:
+            self._schedule_relayout(e.width)
         self._update_scrollbar()
 
     def _on_outer_resize(self, e):

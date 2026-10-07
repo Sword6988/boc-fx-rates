@@ -13,6 +13,7 @@ TESTS = [
     "tests/test_fetchall.py",
     "tests/test_color.py",
     "tests/test_consistency.py",
+    "tests/test_drag_gui.py",
 ]
 
 

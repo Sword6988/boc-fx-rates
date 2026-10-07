@@ -60,7 +60,7 @@ exe 未做代码签名，首次运行时 Windows SmartScreen 可能弹出「Wind
 本地一键发布（CI 不可用时的备用通道）：
 
 ```powershell
-.\release.ps1 -Tag v1.9.4 [-NotesFile 发布说明.md]
+.\release.ps1 -Tag v1.9.5 [-NotesFile 发布说明.md]
 ```
 
 流程：校验 tag 与 `version_info.txt` 版本一致 → 工作区干净检查 → 跑测试 → 打包 → 推送 main 与 tag → 通过 GitHub API 创建 Release 并上传 exe（附件名 `boc-fx-rates-<tag>.exe`）。

@@ -8,7 +8,7 @@
 连带拉起 tkinter 与 Windows 专有的 ctypes.windll）。
 """
 
-__all__ = ["mix_color", "norm_color", "ease_out_cubic", "lin"]
+__all__ = ["mix_color", "norm_color", "ease_out_cubic", "ease_out_quad", "lin"]
 
 
 def mix_color(c1, c2, t):
@@ -51,6 +51,17 @@ def norm_color(widget, color):
 def ease_out_cubic(t):
     """三次缓出：起步快、收尾缓（t=0→0，t=1→1）。"""
     return 1.0 - (1.0 - t) ** 3
+
+
+def ease_out_quad(t):
+    """二次缓出：起步快、收尾缓（t=0→0，t=1→1）。
+
+    与 ease_out_cubic 同族，但收尾「更短」——同一末帧预算内前段走得更满：
+    8 步采样下首帧位移占比约 23%（cubic 约 33%），末帧仍有约 7px（cubic
+    仅约 1px）。用于交互反馈（拖拽换位）：起手就跟得上，尾巴又不会短到
+    肉眼觉得「瞬移一下再慢慢爬」。结构性变化（列数重排）仍用 cubic，更从容。
+    """
+    return 1.0 - (1.0 - t) ** 2
 
 
 def lin(t):

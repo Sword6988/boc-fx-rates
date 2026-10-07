@@ -1680,12 +1680,12 @@ class App(tk.Tk):
     # 需要换位之前卡片一直留在 grid 态（零成本、零风险）。首次跨卡时顺序尚未
     # 改变，各卡的 grid 几何即槽位几何，直接 winfo 读取即可，无需任何
     # _layout_cards。实测（30 卡 / 3 列）：若在「进入拖拽」时就做这一步，需
-    # update_idletasks(≈26ms，被拖卡描边由 1px 改 2px 触发 grid 全表重排) +
-    # 30 次 place(≈10ms)，起拖瞬间阻塞 ≈37ms；推迟后起拖只剩描边 config +
-    # lift（≈0.2ms），而这 ≈37ms 移到首次跨卡（该处本来就要付一次 160ms 换位
-    # 动画）。松手时再交还 grid 一次（_return_to_grid）。旧实现每次换位都跑
-    # 两遍 grid 全表重排（setup 一次、finish 一次），30 卡下约 206ms 纯阻塞，
-    # 是「顿挫」主因。
+    # update_idletasks（描边厚度已不再变化——只在 1px 下改颜色，几何不变，
+    # 故无 grid 全表重排）+ 30 次 place(≈10ms)，起拖瞬间阻塞 ≈10ms；推迟后
+    # 起拖只剩描边颜色 config + lift（≈0.3ms），而这 ≈10ms 移到首次跨卡（该处
+    # 本来就要付一次 160ms 换位动画）。松手时再交还 grid 一次（_return_to_grid）
+    # 。旧实现每次换位都跑两遍 grid 全表重排（setup 一次、finish 一次），30 卡下
+    # 约 206ms 纯阻塞，是「顿挫」主因。
     # 命中判定用「槽位矩形表」_drag_slots（按槽位号索引）；首次跨卡前该表
     # 为 None，此时回退读各卡的 grid winfo（等价，因为顺序尚未改变）。
     # 松开恢复描边并保存顺序（selected 字段本身即顺序）。阈值内的按下-松开
@@ -1703,9 +1703,9 @@ class App(tk.Tk):
         拖拽中改窗口尺寸时（_drag_resync）会重算一次，属必要。
 
         **必须把全部卡片都 place**（而非只 place 换位的几张）：place 会把卡片
-        移出 grid，若只移出部分，grid 会按剩余子控件重排行高——被拖卡因描边加厚
-        请求高多 2px，该行会塌缩 2px，产生可见抖动（上一轮专门消除过这类 1~2px
-        偏差）。全部 place 后 grid 无子控件，几何冻结，无重排。
+        移出 grid，若只移出部分，grid 会按剩余子控件重新计算该行行高（行高随
+        卡内内容或尺寸差异而变），产生可见抖动。全部 place 后 grid 无子控件，
+        几何冻结，无重排。
         """
         try:
             self.update_idletasks()          # 确保 grid 几何新鲜
@@ -1796,7 +1796,7 @@ class App(tk.Tk):
         code = self._drag.get("code") if self._drag else None
         if code and code in self.cards:
             card = self.cards[code]["card"]
-            card.config(highlightthickness=2, highlightbackground=COLOR_ACCENT,
+            card.config(highlightthickness=1, highlightbackground=COLOR_ACCENT,
                         highlightcolor=COLOR_ACCENT)
             card.lift()
 
@@ -1827,11 +1827,12 @@ class App(tk.Tk):
         """进入拖拽：被拖卡红色描边高亮表示「抓起」并置顶，位置原地不动。
 
         这里**不**做任何布局工作——槽位表与「全部卡片落位」推迟到首次真正跨卡
-        时由 _drag_begin_slots 完成（见上方性能要点）。因此起拖瞬间零阻塞：
-        实测 30 卡下本函数 ≈0.2ms（对比：若在此把 30 张卡全部 place 需 ≈37ms）。
+        时由 _drag_begin_slots 完成（见上方性能要点）。且描边只在 1px 下改颜色、
+        不改厚度，几何不变，不会触发 grid 重排。因此起拖瞬间零阻塞：
+        实测 30 卡下本函数 ≈0.3ms（对比：若在此把 30 张卡全部 place 需 ≈10ms）。
         """
         card = self.cards[self._drag["code"]]["card"]
-        card.config(highlightthickness=2, highlightbackground=COLOR_ACCENT,
+        card.config(highlightthickness=1, highlightbackground=COLOR_ACCENT,
                     highlightcolor=COLOR_ACCENT)
         card.lift()    # 动画越位时不被相邻卡片遮挡
 
@@ -1972,7 +1973,8 @@ class App(tk.Tk):
             if placed:
                 self._return_to_grid()
             else:
-                # 从未跨卡：只补一次滚动条（描边厚度往返可能让内容高变 2px）
+                # 从未跨卡：卡片始终在 grid，补一次滚动条作无害防御（起拖只改描边
+                # 颜色、不改厚度，几何不变，内容高也就不会变化）。
                 self._update_scrollbar()
         # 否则：在途动画末帧的 _after_drag_flip 会看到 _drag 已 None 并交还 grid
         _save_config(self._selected, self.geometry(), self._inverse)
